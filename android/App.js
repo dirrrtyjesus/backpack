@@ -4047,6 +4047,9 @@ function AppContent() {
         setLedgerAccounts(accounts.slice(0, 5));
       }
 
+      // Reset progress to stop the scanning indicator
+      setLedgerWalletProgress(0);
+
       // DON'T close transport immediately! Keep it alive.
       // This prevents the BLE crash from happening during the RxJava cleanup phase.
       // The transport will be cleaned up when:
@@ -4343,7 +4346,7 @@ function AppContent() {
 
     const newWallet = {
       id: Date.now(),
-      name: `Ledger ${account.index + 1}`,
+      name: `Ledger ${account.displayIndex + 1}`,
       address: account.address,
       publicKey: account.address,
       selected: true, // Set new wallet as selected
@@ -4399,8 +4402,8 @@ function AppContent() {
       }
 
       const newWallet = {
-        id: Date.now() + account.index, // Unique ID for each wallet
-        name: `Ledger ${account.index + 1}`,
+        id: Date.now() + account.displayIndex, // Unique ID for each wallet
+        name: `Ledger ${account.displayIndex + 1}`,
         address: account.address,
         publicKey: account.address,
         selected: false, // Will select the first one after loop
@@ -4411,7 +4414,9 @@ function AppContent() {
       };
 
       newWallets.push(newWallet);
-      console.log(`Added account ${account.index + 1}: ${account.address}`);
+      console.log(
+        `Added account ${account.displayIndex + 1}: ${account.address}`
+      );
 
       // Register each wallet with the transaction indexer
       await registerWalletWithIndexer(
@@ -6582,14 +6587,8 @@ function AppContent() {
               { backgroundColor: easterEggMode ? "#111827" : "#000" },
             ]}
           >
-            <View
-              style={[
-                styles.bottomSheetHeader,
-                { paddingTop: Math.max(insets.top, 8) },
-              ]}
-            >
-              <View style={{ width: 32 }} />
-              <Text style={styles.bottomSheetTitle}>Connect Ledger</Text>
+            <View style={[styles.bottomSheetHeader, { paddingTop: 8 }]}>
+              <View style={{ flex: 1 }} />
               <TouchableOpacity
                 onPress={() => ledgerSheetRef.current?.dismiss()}
               >
@@ -6629,41 +6628,59 @@ function AppContent() {
               {ledgerAccounts.length > 0 ? (
                 // Account Selection UI - Compact Design
                 <>
-                  <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-                    <Text
-                      style={{
-                        color: "#FFFFFF",
-                        fontSize: 14,
-                        fontWeight: "600",
-                        marginBottom: 4,
-                      }}
-                    >
-                      {ledgerAccounts.length} Account
-                      {ledgerAccounts.length > 1 ? "s" : ""} Found
-                    </Text>
-                    <Text style={{ color: "#666", fontSize: 11 }}>
-                      Scanned:{" "}
-                      {ledgerDerivationPatterns
-                        .map((p) => {
-                          if (p === "standard") return "Standard";
-                          if (p === "ledgerLive") return "Ledger Live";
-                          if (p === "alternate") return "Alternate";
-                          return p;
-                        })
-                        .join(", ")}
-                    </Text>
+                  <View
+                    style={{
+                      paddingHorizontal: 16,
+                      paddingTop: 8,
+                      flexDirection: "row",
+                      alignItems: "center",
+                    }}
+                  >
+                    {ledgerWalletProgress > 0 && (
+                      <ActivityIndicator
+                        size="small"
+                        color="#4A90E2"
+                        style={{ marginRight: 8 }}
+                      />
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          color: "#FFFFFF",
+                          fontSize: 14,
+                          fontWeight: "600",
+                          marginBottom: 4,
+                        }}
+                      >
+                        {ledgerAccounts.length} Account
+                        {ledgerAccounts.length > 1 ? "s" : ""} Found
+                        {ledgerWalletProgress > 0 &&
+                          ` (Scanning ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length})`}
+                      </Text>
+                      <Text style={{ color: "#666", fontSize: 11 }}>
+                        Scanned:{" "}
+                        {ledgerDerivationPatterns
+                          .map((p) => {
+                            if (p === "standard") return "Standard";
+                            if (p === "ledgerLive") return "Ledger Live";
+                            if (p === "alternate") return "Alternate";
+                            return p;
+                          })
+                          .join(", ")}
+                      </Text>
+                    </View>
                   </View>
 
                   {/* Add All Accounts Button */}
                   {ledgerAccounts.length > 1 && (
-                    <View style={{ paddingHorizontal: 20, paddingTop: 16 }}>
+                    <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
                       <TouchableOpacity
                         onPress={handleAddAllLedgerAccounts}
                         style={{
                           backgroundColor: "#4A90E2",
-                          borderRadius: 12,
-                          padding: 16,
-                          marginBottom: 12,
+                          borderRadius: 8,
+                          padding: 10,
+                          marginBottom: 8,
                           borderWidth: 1,
                           borderColor: "rgba(74, 144, 226, 0.3)",
                         }}
@@ -6671,7 +6688,7 @@ function AppContent() {
                         <Text
                           style={{
                             color: "#FFFFFF",
-                            fontSize: 16,
+                            fontSize: 14,
                             fontWeight: "600",
                             textAlign: "center",
                           }}
@@ -6681,9 +6698,9 @@ function AppContent() {
                         <Text
                           style={{
                             color: "rgba(255, 255, 255, 0.8)",
-                            fontSize: 12,
+                            fontSize: 11,
                             textAlign: "center",
-                            marginTop: 4,
+                            marginTop: 2,
                           }}
                         >
                           Import all discovered accounts at once
@@ -6810,7 +6827,7 @@ function AppContent() {
                   ListHeaderComponent={
                     <>
                       {/* Derivation Path Selector - Multi-Select */}
-                      <View style={{ paddingHorizontal: 20, paddingTop: 16 }}>
+                      <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
                         <Text
                           style={{
                             color: "#999",

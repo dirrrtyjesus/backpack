@@ -7,6 +7,7 @@ import {
   ScrollView,
   Image,
   Linking,
+  ActivityIndicator,
 } from "react-native";
 
 export default function LedgerConnectionScreen({
@@ -25,7 +26,13 @@ export default function LedgerConnectionScreen({
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <View style={{ width: 32 }} />
+        <View
+          style={{ width: 32, alignItems: "center", justifyContent: "center" }}
+        >
+          {(ledgerScanning || ledgerConnecting) && (
+            <ActivityIndicator size="small" color="#4A90E2" />
+          )}
+        </View>
         <Text style={styles.headerTitle}>Connect Ledger</Text>
         <TouchableOpacity onPress={onDismiss}>
           <Text style={styles.headerClose}>✕</Text>
