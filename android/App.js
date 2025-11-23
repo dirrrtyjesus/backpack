@@ -6496,6 +6496,36 @@ function AppContent() {
                 <FlatList
                   data={discoveredDevices}
                   keyExtractor={(item) => item.id}
+                  ListHeaderComponent={
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: "#1a1a1a",
+                        paddingVertical: 12,
+                        paddingHorizontal: 16,
+                        marginHorizontal: 20,
+                        marginTop: 16,
+                        marginBottom: 16,
+                        borderRadius: 8,
+                        borderLeftWidth: 3,
+                        borderLeftColor: "#4A90E2",
+                      }}
+                      onPress={() => {
+                        Linking.sendIntent(
+                          "android.settings.BLUETOOTH_SETTINGS"
+                        );
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          color: "#CCCCCC",
+                          textAlign: "center",
+                        }}
+                      >
+                        Having connection issues? Check Bluetooth Settings
+                      </Text>
+                    </TouchableOpacity>
+                  }
                   ListFooterComponent={
                     ledgerConnecting ? (
                       // Wallet Discovery Progress Indicator - Simple centered design

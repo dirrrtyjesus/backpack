@@ -1,4 +1,4 @@
-import React from 'react';
+import React from "react";
 import {
   View,
   Text,
@@ -6,7 +6,8 @@ import {
   StyleSheet,
   ScrollView,
   Image,
-} from 'react-native';
+  Linking,
+} from "react-native";
 
 export default function LedgerConnectionScreen({
   ledgerScanning,
@@ -17,6 +18,10 @@ export default function LedgerConnectionScreen({
   handleSelectLedgerAccount,
   onDismiss,
 }) {
+  const openBluetoothSettings = () => {
+    Linking.sendIntent("android.settings.BLUETOOTH_SETTINGS");
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -33,6 +38,14 @@ export default function LedgerConnectionScreen({
           <Text style={styles.ledgerStatusSubtext}>
             Make sure Bluetooth is on and Solana app is open
           </Text>
+          <TouchableOpacity
+            style={styles.bluetoothButton}
+            onPress={openBluetoothSettings}
+          >
+            <Text style={styles.bluetoothButtonText}>
+              Open Bluetooth Settings
+            </Text>
+          </TouchableOpacity>
         </View>
       ) : ledgerConnecting ? (
         <View style={styles.ledgerStatus}>
@@ -41,12 +54,26 @@ export default function LedgerConnectionScreen({
               ? `Connecting to ${ledgerDeviceName}...`
               : "Connecting..."}
           </Text>
+          <TouchableOpacity
+            style={styles.bluetoothButton}
+            onPress={openBluetoothSettings}
+          >
+            <Text style={styles.bluetoothButtonText}>
+              Open Bluetooth Settings
+            </Text>
+          </TouchableOpacity>
         </View>
       ) : Array.isArray(ledgerAccounts) && ledgerAccounts.length > 0 ? (
         <>
-          <Text style={styles.ledgerAccountsTitle}>
-            Select an account:
-          </Text>
+          <Text style={styles.ledgerAccountsTitle}>Select an account:</Text>
+          <TouchableOpacity
+            style={styles.bluetoothSettingsRow}
+            onPress={openBluetoothSettings}
+          >
+            <Text style={styles.bluetoothSettingsText}>
+              Having connection issues? Check Bluetooth Settings
+            </Text>
+          </TouchableOpacity>
           <ScrollView style={styles.ledgerAccountsList}>
             {ledgerAccounts.map((account) => (
               <TouchableOpacity
@@ -79,6 +106,14 @@ export default function LedgerConnectionScreen({
       ) : (
         <View style={styles.ledgerStatus}>
           <Text style={styles.ledgerStatusText}>Scanning...</Text>
+          <TouchableOpacity
+            style={styles.bluetoothButton}
+            onPress={openBluetoothSettings}
+          >
+            <Text style={styles.bluetoothButtonText}>
+              Open Bluetooth Settings
+            </Text>
+          </TouchableOpacity>
         </View>
       )}
     </View>
@@ -88,68 +123,69 @@ export default function LedgerConnectionScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: "#000000",
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: "#1a1a1a",
   },
   headerTitle: {
     fontSize: 18,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    fontWeight: "600",
+    color: "#FFFFFF",
   },
   headerClose: {
     fontSize: 24,
-    color: '#4A90E2',
-    fontWeight: '600',
+    color: "#4A90E2",
+    fontWeight: "600",
   },
   ledgerStatus: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
     padding: 32,
   },
   ledgerStatusText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    fontWeight: "600",
+    color: "#FFFFFF",
     marginBottom: 8,
-    textAlign: 'center',
+    textAlign: "center",
   },
   ledgerStatusSubtext: {
     fontSize: 14,
-    color: '#888888',
-    textAlign: 'center',
+    color: "#888888",
+    textAlign: "center",
   },
   ledgerAccountsTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    fontWeight: "600",
+    color: "#FFFFFF",
     paddingHorizontal: 16,
     paddingVertical: 16,
   },
   ledgerAccountsList: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
     paddingHorizontal: 16,
   },
   ledgerAccount: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#0a0a0a',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#0a0a0a",
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
   },
   ledgerAccountLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     flex: 1,
   },
   x1LogoLarge: {
@@ -163,13 +199,40 @@ const styles = StyleSheet.create({
   },
   ledgerAccountIndex: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    fontWeight: "600",
+    color: "#FFFFFF",
     marginBottom: 4,
   },
   ledgerAccountAddress: {
     fontSize: 12,
-    color: '#888888',
-    fontFamily: 'monospace',
+    color: "#888888",
+    fontFamily: "monospace",
+  },
+  bluetoothButton: {
+    backgroundColor: "#333333",
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 24,
+    alignItems: "center",
+  },
+  bluetoothButtonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#FFFFFF",
+  },
+  bluetoothSettingsRow: {
+    backgroundColor: "#1a1a1a",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    borderRadius: 8,
+    borderLeftWidth: 3,
+    borderLeftColor: "#4A90E2",
+  },
+  bluetoothSettingsText: {
+    fontSize: 14,
+    color: "#CCCCCC",
+    textAlign: "center",
   },
 });
