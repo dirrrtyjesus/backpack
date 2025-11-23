@@ -97,6 +97,20 @@ export default function LedgerConnectionScreen({
                     >
                       {account.address || "Unknown address"}
                     </Text>
+                    {(account.solanaBalance > 0 || account.x1Balance > 0) && (
+                      <View style={styles.balanceContainer}>
+                        {account.solanaBalance > 0 && (
+                          <Text style={styles.balanceText}>
+                            SOL: {account.solanaBalance.toFixed(4)}
+                          </Text>
+                        )}
+                        {account.x1Balance > 0 && (
+                          <Text style={styles.balanceText}>
+                            X1: {account.x1Balance.toFixed(4)}
+                          </Text>
+                        )}
+                      </View>
+                    )}
                   </View>
                 </View>
               </TouchableOpacity>
@@ -207,6 +221,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#888888",
     fontFamily: "monospace",
+  },
+  balanceContainer: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 4,
+  },
+  balanceText: {
+    fontSize: 11,
+    color: "#4A90E2",
+    fontWeight: "500",
   },
   bluetoothButton: {
     backgroundColor: "#333333",
