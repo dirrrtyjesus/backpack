@@ -6368,29 +6368,31 @@ function AppContent() {
             </View>
 
             {/* Check BLE Status Button */}
-            <View style={{ paddingHorizontal: 20, paddingTop: 12 }}>
-              <TouchableOpacity
-                onPress={checkBLEStatus}
-                style={{
-                  backgroundColor: "#2a2a2a",
-                  borderRadius: 8,
-                  padding: 12,
-                  borderWidth: 1,
-                  borderColor: "rgba(74, 144, 226, 0.3)",
-                }}
-              >
-                <Text
+            {false && (
+              <View style={{ paddingHorizontal: 20, paddingTop: 12 }}>
+                <TouchableOpacity
+                  onPress={checkBLEStatus}
                   style={{
-                    color: "#4A90E2",
-                    fontSize: 14,
-                    fontWeight: "600",
-                    textAlign: "center",
+                    backgroundColor: "#2a2a2a",
+                    borderRadius: 8,
+                    padding: 12,
+                    borderWidth: 1,
+                    borderColor: "rgba(74, 144, 226, 0.3)",
                   }}
                 >
-                  📊 Check BLE Status
-                </Text>
-              </TouchableOpacity>
-            </View>
+                  <Text
+                    style={{
+                      color: "#4A90E2",
+                      fontSize: 14,
+                      fontWeight: "600",
+                      textAlign: "center",
+                    }}
+                  >
+                    📊 Check BLE Status
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {/* Discovered Devices List or Account Selection */}
             <View style={styles.ledgerAccountsList}>
