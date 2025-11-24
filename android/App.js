@@ -1133,6 +1133,43 @@ function AppContent() {
     }
   };
 
+  // Fetch token metadata from REST API
+  const fetchTokenMetadata = async (tokenSymbol) => {
+    try {
+      console.log(`[Token API] Fetching metadata for: ${tokenSymbol}`);
+      const response = await fetch(
+        `${API_SERVER}/tokens?symbol=${encodeURIComponent(tokenSymbol)}&verified=true`
+      );
+
+      if (!response.ok) {
+        console.log(
+          `[Token API] Failed to fetch token metadata: ${response.status}`
+        );
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (data && data.tokens && data.tokens.length > 0) {
+        const token = data.tokens[0]; // Use first (highest market cap) result
+        console.log(`[Token API] Found token: ${token.name} ($${token.price})`);
+        return {
+          name: token.name,
+          symbol: token.symbol,
+          icon: token.icon,
+          price: token.price,
+          mint: token.mint,
+        };
+      }
+
+      console.log(`[Token API] No token found for: ${tokenSymbol}`);
+      return null;
+    } catch (error) {
+      console.error(`[Token API] Error fetching token metadata:`, error);
+      return null;
+    }
+  };
+
   // Fetch transactions with on-demand indexing and polling
   const checkTransactions = async (network = null) => {
     if (!selectedWallet) return;
@@ -1195,55 +1232,83 @@ function AppContent() {
           // Transactions found!
           transactionsFound = true;
 
-          const formattedTransactions = data.transactions.map((tx) => {
-            let date;
-            if (typeof tx.timestamp === "string") {
-              date = new Date(tx.timestamp);
-            } else if (typeof tx.timestamp === "number") {
-              date = new Date(tx.timestamp * 1000);
-            } else {
-              date = new Date();
-            }
-            const isValidDate = !isNaN(date.getTime());
+          const formattedTransactions = await Promise.all(
+            data.transactions.map(async (tx) => {
+              let date;
+              if (typeof tx.timestamp === "string") {
+                date = new Date(tx.timestamp);
+              } else if (typeof tx.timestamp === "number") {
+                date = new Date(tx.timestamp * 1000);
+              } else {
+                date = new Date();
+              }
+              const isValidDate = !isNaN(date.getTime());
 
-            const amountNum =
-              typeof tx.amount === "string"
-                ? parseFloat(tx.amount)
-                : tx.amount || 0;
+              const amountNum =
+                typeof tx.amount === "string"
+                  ? parseFloat(tx.amount)
+                  : tx.amount || 0;
 
-            let displayType = "received";
-            if (tx.type === "SEND") {
-              displayType = "sent";
-            } else if (tx.type === "RECEIVE") {
-              displayType = "received";
-            } else if (tx.type === "SWAP") {
-              displayType = "swap";
-            } else if (tx.type === "UNKNOWN") {
-              displayType = "unknown";
-            }
+              let displayType = "received";
+              if (tx.type === "SEND") {
+                displayType = "sent";
+              } else if (tx.type === "RECEIVE") {
+                displayType = "received";
+              } else if (tx.type === "SWAP") {
+                displayType = "swap";
+              } else if (tx.type === "UNKNOWN") {
+                displayType = "unknown";
+              }
 
-            return {
-              id: tx.hash || tx.signature,
-              type: displayType,
-              amount: amountNum.toLocaleString("en-US", {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 9,
-              }),
-              token: tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol,
-              timestamp: isValidDate
-                ? date.toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                    hour: "numeric",
-                    minute: "2-digit",
-                    hour12: true,
-                  })
-                : "Unknown",
-              fee: tx.fee || "0.000001650",
-              signature: tx.hash || tx.signature,
-            };
-          });
+              // Get token symbol (fallback to native token if not specified)
+              const tokenSymbol =
+                tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol;
+
+              // Fetch token metadata from REST API (only for non-native tokens on Solana)
+              let tokenMetadata = null;
+              const isSolanaNetwork =
+                activeNetwork.id === "SOLANA" ||
+                activeNetwork.id === "SOLANA_DEVNET";
+              const isNativeToken =
+                tokenSymbol === "SOL" || tokenSymbol === "XNT";
+
+              if (isSolanaNetwork && !isNativeToken) {
+                tokenMetadata = await fetchTokenMetadata(tokenSymbol);
+              }
+
+              // Calculate USD value if we have token price
+              const valueUSD = tokenMetadata?.price
+                ? (amountNum * tokenMetadata.price).toFixed(2)
+                : null;
+
+              return {
+                id: tx.hash || tx.signature,
+                type: displayType,
+                amount: amountNum.toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 9,
+                }),
+                amountRaw: amountNum, // Keep raw amount for calculations
+                token: tokenSymbol,
+                tokenName: tokenMetadata?.name || tx.tokenName || null,
+                tokenIcon: tokenMetadata?.icon || null,
+                tokenPrice: tokenMetadata?.price || null,
+                valueUSD: valueUSD,
+                timestamp: isValidDate
+                  ? date.toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "Unknown",
+                fee: tx.fee || "0.000001650",
+                signature: tx.hash || tx.signature,
+              };
+            })
+          );
 
           console.log(
             `✅ Setting ${formattedTransactions.length} transactions to state`
@@ -6169,9 +6234,11 @@ function AppContent() {
                     {/* Token logo */}
                     <Image
                       source={
-                        tx.token === "XNT"
-                          ? require("./assets/x1.png")
-                          : require("./assets/solana.png")
+                        tx.tokenIcon
+                          ? { uri: tx.tokenIcon }
+                          : tx.token === "XNT"
+                            ? require("./assets/x1.png")
+                            : require("./assets/solana.png")
                       }
                       style={styles.activityCardLogo}
                     />
@@ -6179,10 +6246,17 @@ function AppContent() {
                     <View style={styles.activityCardContent}>
                       {/* Header with title and time */}
                       <View style={styles.activityCardHeader}>
-                        <Text style={styles.activityCardTitle}>
-                          {tx.type === "received" ? "Received" : "Sent"}{" "}
-                          {tx.token}
-                        </Text>
+                        <View style={styles.activityCardTitleContainer}>
+                          <Text style={styles.activityCardTitle}>
+                            {tx.type === "received" ? "Received" : "Sent"}{" "}
+                            {tx.token}
+                          </Text>
+                          {tx.tokenName && (
+                            <Text style={styles.activityCardSubtitle}>
+                              {tx.tokenName}
+                            </Text>
+                          )}
+                        </View>
                         <Text style={styles.activityCardTime}>
                           {tx.timestamp}
                         </Text>
@@ -6191,18 +6265,27 @@ function AppContent() {
                       {/* Amount row */}
                       <View style={styles.activityCardRow}>
                         <Text style={styles.activityCardLabel}>Amount</Text>
-                        <Text
-                          style={[
-                            styles.activityCardValue,
-                            {
-                              color:
-                                tx.type === "received" ? "#00D084" : "#FF6B6B",
-                            },
-                          ]}
-                        >
-                          {tx.type === "received" ? "+" : "-"}
-                          {tx.amount} {tx.token}
-                        </Text>
+                        <View style={styles.activityCardValueContainer}>
+                          <Text
+                            style={[
+                              styles.activityCardValue,
+                              {
+                                color:
+                                  tx.type === "received"
+                                    ? "#00D084"
+                                    : "#FF6B6B",
+                              },
+                            ]}
+                          >
+                            {tx.type === "received" ? "+" : "-"}
+                            {tx.amount} {tx.token}
+                          </Text>
+                          {tx.valueUSD && (
+                            <Text style={styles.activityCardValueUSD}>
+                              ≈ ${tx.valueUSD}
+                            </Text>
+                          )}
+                        </View>
                       </View>
 
                       {/* Fee row */}
@@ -9111,9 +9194,26 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
   },
+  activityCardTitleContainer: {
+    flexDirection: "column",
+  },
+  activityCardSubtitle: {
+    color: "#999999",
+    fontSize: 13,
+    marginTop: 2,
+  },
   activityCardTime: {
     color: "#999999",
     fontSize: 13,
+  },
+  activityCardValueContainer: {
+    flexDirection: "column",
+    alignItems: "flex-end",
+  },
+  activityCardValueUSD: {
+    color: "#999999",
+    fontSize: 12,
+    marginTop: 2,
   },
   activityCardRow: {
     flexDirection: "row",
