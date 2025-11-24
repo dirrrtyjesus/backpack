@@ -17,10 +17,22 @@
  *    Request: { address: string, providerId: string, limit: number, offset: number }
  *    Response: { transactions: [...], hasMore: boolean, totalCount: number }
  *
- * 3. POST /v2/graphql
+ * 3. GET /tokens?symbol=SOL or /tokens?mint=address
+ *    Query token metadata by symbol or mint address
+ *    Response: { tokens: [...], count: number }
+ *
+ * 4. GET /tokens/search?q=solana
+ *    Search tokens by name or symbol
+ *    Response: { tokens: [...], count: number }
+ *
+ * 5. GET /tokens/top?limit=10
+ *    Get top tokens by market cap
+ *    Response: { tokens: [...], count: number }
+ *
+ * 6. POST /v2/graphql
  *    Handles GraphQL queries (priority fees, etc.)
  *
- * 4. GET /test
+ * 7. GET /test
  *    Test page for wallet integration
  */
 
@@ -162,8 +174,69 @@ function initializeDatabase() {
                 }
               );
 
-              console.log("✅ Database initialized");
-              resolve();
+              // Create tokens table for Solana token metadata
+              db.run(
+                `CREATE TABLE IF NOT EXISTS tokens (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  icon TEXT,
+                  decimals INTEGER NOT NULL,
+                  dev TEXT,
+                  circ_supply REAL,
+                  total_supply REAL,
+                  token_program TEXT,
+                  holder_count INTEGER,
+                  fdv REAL,
+                  mcap REAL,
+                  usd_price REAL,
+                  price_block_id INTEGER,
+                  liquidity REAL,
+                  twitter TEXT,
+                  discord TEXT,
+                  website TEXT,
+                  telegram TEXT,
+                  tags TEXT,
+                  is_verified INTEGER DEFAULT 0,
+                  organic_score REAL,
+                  created_at TEXT,
+                  updated_at TEXT,
+                  last_synced DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`,
+                (err) => {
+                  if (err) {
+                    console.error("❌ Error creating tokens table:", err);
+                    reject(err);
+                    return;
+                  }
+
+                  // Create indexes for tokens table
+                  db.run(
+                    `CREATE INDEX IF NOT EXISTS idx_token_symbol ON tokens(symbol)`,
+                    (err) => {
+                      if (err)
+                        console.error(
+                          "Warning: Error creating token_symbol index:",
+                          err
+                        );
+                    }
+                  );
+
+                  db.run(
+                    `CREATE INDEX IF NOT EXISTS idx_token_verified ON tokens(is_verified)`,
+                    (err) => {
+                      if (err)
+                        console.error(
+                          "Warning: Error creating token_verified index:",
+                          err
+                        );
+                    }
+                  );
+
+                  console.log("✅ Database initialized");
+                  resolve();
+                }
+              );
             }
           );
         }
@@ -1191,6 +1264,277 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Handle /tokens endpoint - Query token metadata
+  // GET /tokens?symbol=SOL or GET /tokens?mint=So11111...
+  if (pathname === "/tokens" && req.method === "GET") {
+    (async () => {
+      try {
+        const symbol = query.symbol;
+        const mint = query.mint;
+        const limit = Math.min(parseInt(query.limit || "50"), 100);
+        const verified = query.verified === "true";
+
+        if (!symbol && !mint) {
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error: "Bad Request",
+              message: "Required: ?symbol=SOL or ?mint=address",
+            })
+          );
+          return;
+        }
+
+        console.log(
+          `\n🔍 Token query: ${symbol ? `symbol=${symbol}` : `mint=${mint}`}${verified ? " (verified only)" : ""}`
+        );
+
+        let sql;
+        let params;
+
+        if (mint) {
+          // Query by mint address (exact match)
+          sql = verified
+            ? `SELECT * FROM tokens WHERE id = ? AND is_verified = 1`
+            : `SELECT * FROM tokens WHERE id = ?`;
+          params = [mint];
+        } else {
+          // Query by symbol (can return multiple results)
+          sql = verified
+            ? `SELECT * FROM tokens WHERE symbol = ? AND is_verified = 1 ORDER BY mcap DESC LIMIT ?`
+            : `SELECT * FROM tokens WHERE symbol = ? ORDER BY mcap DESC LIMIT ?`;
+          params = [symbol.toUpperCase(), limit];
+        }
+
+        db.all(sql, params, (err, rows) => {
+          if (err) {
+            console.error(`❌ Token query error: ${err.message}`);
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error: "Database Error",
+                message: err.message,
+              })
+            );
+            return;
+          }
+
+          const tokens = rows.map((row) => ({
+            mint: row.id,
+            name: row.name,
+            symbol: row.symbol,
+            icon: row.icon,
+            decimals: row.decimals,
+            price: row.usd_price,
+            mcap: row.mcap,
+            fdv: row.fdv,
+            liquidity: row.liquidity,
+            holderCount: row.holder_count,
+            isVerified: row.is_verified === 1,
+            organicScore: row.organic_score,
+            tags: row.tags ? row.tags.split(",") : [],
+            social: {
+              twitter: row.twitter,
+              discord: row.discord,
+              website: row.website,
+              telegram: row.telegram,
+            },
+            supply: {
+              circulating: row.circ_supply,
+              total: row.total_supply,
+            },
+            lastSynced: row.last_synced,
+          }));
+
+          console.log(`✅ Found ${tokens.length} token(s)\n`);
+
+          res.writeHead(200);
+          res.end(
+            JSON.stringify(
+              {
+                tokens,
+                count: tokens.length,
+                query: { symbol, mint, verified },
+              },
+              null,
+              2
+            )
+          );
+        });
+      } catch (error) {
+        console.error(`❌ Token endpoint error: ${error.message}`);
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Internal Server Error",
+            message: error.message,
+          })
+        );
+      }
+    })();
+    return;
+  }
+
+  // Handle /tokens/search endpoint - Search tokens by name or symbol
+  // GET /tokens/search?q=solana
+  if (pathname === "/tokens/search" && req.method === "GET") {
+    (async () => {
+      try {
+        const searchQuery = query.q;
+        const limit = Math.min(parseInt(query.limit || "20"), 100);
+        const verified = query.verified === "true";
+
+        if (!searchQuery || searchQuery.length < 2) {
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error: "Bad Request",
+              message: "Required: ?q=<search term> (min 2 characters)",
+            })
+          );
+          return;
+        }
+
+        console.log(
+          `\n🔎 Token search: "${searchQuery}"${verified ? " (verified only)" : ""}`
+        );
+
+        const searchPattern = `%${searchQuery}%`;
+        const sql = verified
+          ? `SELECT * FROM tokens 
+             WHERE (name LIKE ? OR symbol LIKE ?) AND is_verified = 1 
+             ORDER BY mcap DESC LIMIT ?`
+          : `SELECT * FROM tokens 
+             WHERE name LIKE ? OR symbol LIKE ? 
+             ORDER BY mcap DESC LIMIT ?`;
+
+        db.all(sql, [searchPattern, searchPattern, limit], (err, rows) => {
+          if (err) {
+            console.error(`❌ Token search error: ${err.message}`);
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error: "Database Error",
+                message: err.message,
+              })
+            );
+            return;
+          }
+
+          const tokens = rows.map((row) => ({
+            mint: row.id,
+            name: row.name,
+            symbol: row.symbol,
+            icon: row.icon,
+            decimals: row.decimals,
+            price: row.usd_price,
+            mcap: row.mcap,
+            isVerified: row.is_verified === 1,
+            organicScore: row.organic_score,
+          }));
+
+          console.log(`✅ Found ${tokens.length} matching token(s)\n`);
+
+          res.writeHead(200);
+          res.end(
+            JSON.stringify(
+              {
+                tokens,
+                count: tokens.length,
+                query: searchQuery,
+              },
+              null,
+              2
+            )
+          );
+        });
+      } catch (error) {
+        console.error(`❌ Token search error: ${error.message}`);
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Internal Server Error",
+            message: error.message,
+          })
+        );
+      }
+    })();
+    return;
+  }
+
+  // Handle /tokens/top endpoint - Get top tokens by market cap
+  // GET /tokens/top?limit=10
+  if (pathname === "/tokens/top" && req.method === "GET") {
+    (async () => {
+      try {
+        const limit = Math.min(parseInt(query.limit || "10"), 100);
+        const verified = query.verified !== "false"; // Default to true
+
+        console.log(
+          `\n📊 Top tokens request: limit=${limit}${verified ? " (verified only)" : ""}`
+        );
+
+        const sql = verified
+          ? `SELECT * FROM tokens WHERE is_verified = 1 ORDER BY mcap DESC LIMIT ?`
+          : `SELECT * FROM tokens ORDER BY mcap DESC LIMIT ?`;
+
+        db.all(sql, [limit], (err, rows) => {
+          if (err) {
+            console.error(`❌ Top tokens query error: ${err.message}`);
+            res.writeHead(500);
+            res.end(
+              JSON.stringify({
+                error: "Database Error",
+                message: err.message,
+              })
+            );
+            return;
+          }
+
+          const tokens = rows.map((row) => ({
+            mint: row.id,
+            name: row.name,
+            symbol: row.symbol,
+            icon: row.icon,
+            decimals: row.decimals,
+            price: row.usd_price,
+            mcap: row.mcap,
+            fdv: row.fdv,
+            liquidity: row.liquidity,
+            holderCount: row.holder_count,
+            isVerified: row.is_verified === 1,
+            organicScore: row.organic_score,
+            priceChange24h: null, // Not available in current data
+          }));
+
+          console.log(`✅ Returning top ${tokens.length} tokens\n`);
+
+          res.writeHead(200);
+          res.end(
+            JSON.stringify(
+              {
+                tokens,
+                count: tokens.length,
+              },
+              null,
+              2
+            )
+          );
+        });
+      } catch (error) {
+        console.error(`❌ Top tokens error: ${error.message}`);
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Internal Server Error",
+            message: error.message,
+          })
+        );
+      }
+    })();
+    return;
+  }
+
   // Handle /wallets/index-now endpoint for on-demand indexing
   // This is called when user taps "Activity" in the mobile app
   if (pathname === "/wallets/index-now" && req.method === "POST") {
@@ -1452,6 +1796,18 @@ initializeDatabase()
         `   POST /transactions/store                  - Store transactions to DB`
       );
       console.log(
+        `   GET  /tokens?symbol=SOL                   - Query token by symbol`
+      );
+      console.log(
+        `   GET  /tokens?mint=address                 - Query token by mint`
+      );
+      console.log(
+        `   GET  /tokens/search?q=solana              - Search tokens`
+      );
+      console.log(
+        `   GET  /tokens/top?limit=10                 - Top tokens by mcap`
+      );
+      console.log(
         `   GET  /wallets                             - List registered wallets`
       );
       console.log(
@@ -1465,6 +1821,12 @@ initializeDatabase()
       console.log("Examples:");
       console.log(
         `  curl "http://localhost:${PORT}/wallet/5paZC1vV94AF513DJn5yXj2TTnTEqm4RuPkWgKYujAi5?providerId=X1"`
+      );
+      console.log("");
+      console.log(`  curl "http://localhost:${PORT}/tokens?symbol=SOL"`);
+      console.log("");
+      console.log(
+        `  curl "http://localhost:${PORT}/tokens/search?q=solana&limit=5"`
       );
       console.log("");
       console.log(`  curl -X POST http://localhost:${PORT}/transactions \\`);

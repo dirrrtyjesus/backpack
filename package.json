@@ -33,7 +33,8 @@
     "sync-i18n-to-airtable": "npx esno scripts/sync-localizations-to-airtable.ts",
     "check-deps": "check-dependency-version-consistency .",
     "postinstall": "husky install",
-    "gql": "env-cmd --silent turbo run gql:generate"
+    "gql": "env-cmd --silent turbo run gql:generate",
+    "sync-tokens": "node scripts/sync-jupiter-tokens.js"
   },
   "devDependencies": {
     "@manypkg/cli": "^0.21.1",

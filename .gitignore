@@ -72,3 +72,7 @@ test-ledger/
 **/Cache/
 **/cache/
 x1-app icons
+
+# SQLite databases
+*.db
+*.db-*
