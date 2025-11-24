@@ -3,9 +3,9 @@ import { View, Text, Image, StyleSheet } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Log module load
-console.log("========================================");
-console.log("[TokenIcon] Module loaded - Performance logging enabled");
-console.log("========================================");
+// console.log("========================================");
+// console.log("[TokenIcon] Module loaded - Performance logging enabled");
+// console.log("========================================");
 
 // Performance tracking
 const perfStats = {
@@ -40,7 +40,9 @@ const loadImageCacheFromStorage = async () => {
       Object.entries(parsed).forEach(([url, data]) => {
         imageUrlCache.set(url, data);
       });
-      logPerf(`[CACHE LOAD] Loaded ${imageUrlCache.size} cached image URLs from storage`);
+      logPerf(
+        `[CACHE LOAD] Loaded ${imageUrlCache.size} cached image URLs from storage`
+      );
     }
     cacheLoaded = true;
   } catch (error) {
@@ -58,7 +60,10 @@ const saveImageCacheToStorage = async () => {
   saveCacheTimeout = setTimeout(async () => {
     try {
       const cacheObject = Object.fromEntries(imageUrlCache);
-      await AsyncStorage.setItem(IMAGE_CACHE_STORAGE_KEY, JSON.stringify(cacheObject));
+      await AsyncStorage.setItem(
+        IMAGE_CACHE_STORAGE_KEY,
+        JSON.stringify(cacheObject)
+      );
       logPerf(`[CACHE SAVE] Saved ${imageUrlCache.size} image URLs to storage`);
     } catch (error) {
       console.error("[TokenIcon] Error saving image cache to storage:", error);
@@ -77,14 +82,16 @@ const imageLoadStats = {
   failedLoads: 0,
 };
 
-// Enable/disable performance logging (always enabled for now)
-const ENABLE_PERF_LOGS = true; // Force enabled for debugging
+// Enable/disable performance logging
+const ENABLE_PERF_LOGS = false; // Disabled for production
 
 // Performance logging helper
 const logPerf = (message, data = {}) => {
-  // Always log with a clear prefix - use simple format for better visibility
+  if (!ENABLE_PERF_LOGS) return; // Skip logging when disabled
+  // Log with a clear prefix - use simple format for better visibility
   try {
-    const dataStr = typeof data === 'object' ? JSON.stringify(data) : String(data);
+    const dataStr =
+      typeof data === "object" ? JSON.stringify(data) : String(data);
     console.log(`[TokenIcon Perf] ${message}`, dataStr);
   } catch (e) {
     console.log(`[TokenIcon Perf] ${message}`, data);
@@ -129,19 +136,20 @@ const CachedCharIcon = memo(
       const renderEndTime = getPerfTime();
       const renderTime = renderEndTime - renderStartTime.current;
       const cacheKey = `${symbol}-${size}`;
-      
+
       perfStats.totalRenders++;
       perfStats.totalRenderTime += renderTime;
       perfStats.renderTimes.push(renderTime);
 
       // Check if we've seen this symbol+size combination before
       const isCached = globalSymbolCache.has(cacheKey);
-      
+
       if (!isCached) {
         // First time seeing this symbol+size combination
         globalSymbolCache.set(cacheKey, true);
         perfStats.cacheMisses++;
-        perfStats.symbolCounts[symbol] = (perfStats.symbolCounts[symbol] || 0) + 1;
+        perfStats.symbolCounts[symbol] =
+          (perfStats.symbolCounts[symbol] || 0) + 1;
         logPerf(`[CACHE MISS] First render for "${symbol}" (${size}px)`, {
           char,
           size,
@@ -152,13 +160,16 @@ const CachedCharIcon = memo(
       } else {
         // We've seen this before - this is a cache hit!
         perfStats.cacheHits++;
-        logPerf(`[CACHE HIT] Re-render for "${symbol}" (${size}px) - using cached component`, {
-          char,
-          size,
-          renderTime: `${renderTime.toFixed(2)}ms`,
-          renderId: renderId.current,
-          cacheKey,
-        });
+        logPerf(
+          `[CACHE HIT] Re-render for "${symbol}" (${size}px) - using cached component`,
+          {
+            char,
+            size,
+            renderTime: `${renderTime.toFixed(2)}ms`,
+            renderId: renderId.current,
+            cacheKey,
+          }
+        );
       }
 
       // Log summary every 10 renders
@@ -182,38 +193,32 @@ const CachedCharIcon = memo(
       renderStartTime.current = getPerfTime();
     }, [char, size, backgroundColor, symbol]);
 
-    const containerStyle = useMemo(
-      () => {
-        const styleStart = getPerfTime();
-        const style = [
-          styles.charIconContainer,
-          {
-            width: size,
-            height: size,
-            borderRadius: size / 2,
-            backgroundColor,
-          },
-        ];
-        const styleTime = getPerfTime() - styleStart;
-        if (ENABLE_PERF_LOGS && styleTime > 0.1) {
-          logPerf(`[STYLE] Style calculation took ${styleTime.toFixed(2)}ms`, {
-            symbol,
-          });
-        }
-        return style;
-      },
-      [size, backgroundColor, symbol]
-    );
+    const containerStyle = useMemo(() => {
+      const styleStart = getPerfTime();
+      const style = [
+        styles.charIconContainer,
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          backgroundColor,
+        },
+      ];
+      const styleTime = getPerfTime() - styleStart;
+      if (ENABLE_PERF_LOGS && styleTime > 0.1) {
+        logPerf(`[STYLE] Style calculation took ${styleTime.toFixed(2)}ms`, {
+          symbol,
+        });
+      }
+      return style;
+    }, [size, backgroundColor, symbol]);
 
-    const textStyle = useMemo(
-      () => {
-        // Adjust font size based on character length
-        // For 3 characters, use smaller font; for 1-2 characters, use larger
-        const fontSize = char.length > 2 ? size * 0.35 : size * 0.5;
-        return [styles.charIcon, { fontSize }];
-      },
-      [size, char]
-    );
+    const textStyle = useMemo(() => {
+      // Adjust font size based on character length
+      // For 3 characters, use smaller font; for 1-2 characters, use larger
+      const fontSize = char.length > 2 ? size * 0.35 : size * 0.5;
+      return [styles.charIcon, { fontSize }];
+    }, [size, char]);
 
     return (
       <View style={containerStyle}>
@@ -271,7 +276,7 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
   const isUrlCached = !!cacheEntry;
   const urlLoadSuccess = cacheEntry?.loaded === true;
   const urlLoadFailed = cacheEntry?.loaded === false;
-  
+
   // Initialize state based on cache
   // If cached and successful, show image; if cached and failed, show character; if not cached, try loading
   const [showUrlLogo, setShowUrlLogo] = useState(urlLoadSuccess);
@@ -312,19 +317,25 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
           setShowUrlLogo(false);
           setUrlLoadError(true);
           imageLoadStats.cacheHits++;
-          logPerf(`[IMAGE CACHE HIT] Using cached failure for "${symbol}", showing character icon`, {
-            logoUrl,
-            symbol,
-          });
+          logPerf(
+            `[IMAGE CACHE HIT] Using cached failure for "${symbol}", showing character icon`,
+            {
+              logoUrl,
+              symbol,
+            }
+          );
         }
       } else {
         // URL not cached - attempt to load it once
         setIsLoadingUrl(true);
         imageLoadStats.cacheMisses++;
-        logPerf(`[IMAGE CACHE MISS] Attempting to load image from URL for "${symbol}"`, {
-          logoUrl,
-          symbol,
-        });
+        logPerf(
+          `[IMAGE CACHE MISS] Attempting to load image from URL for "${symbol}"`,
+          {
+            logoUrl,
+            symbol,
+          }
+        );
         // Set a brief delay before attempting to load (to prioritize character icons)
         const timer = setTimeout(() => {
           setShowUrlLogo(true);
@@ -336,43 +347,38 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
 
   // Get 2-3 letter abbreviation for placeholder (memoized)
   // Excludes dollar signs and other special characters
-  const charIcon = useMemo(
-    () => {
-      const start = getPerfTime();
-      if (!symbol) return "?";
-      
-      // Remove dollar signs and other special characters
-      const cleanSymbol = symbol.replace(/[$]/g, '');
-      // Get 2-3 letter abbreviation
-      const text = cleanSymbol.length <= 3 ? cleanSymbol : cleanSymbol.substring(0, 3);
-      const char = text.toUpperCase();
-      
-      const time = getPerfTime() - start;
-      if (ENABLE_PERF_LOGS && time > 0.1) {
-        logPerf(`[CHAR] Character extraction took ${time.toFixed(2)}ms`, {
-          symbol,
-        });
-      }
-      return char;
-    },
-    [symbol]
-  );
+  const charIcon = useMemo(() => {
+    const start = getPerfTime();
+    if (!symbol) return "?";
+
+    // Remove dollar signs and other special characters
+    const cleanSymbol = symbol.replace(/[$]/g, "");
+    // Get 2-3 letter abbreviation
+    const text =
+      cleanSymbol.length <= 3 ? cleanSymbol : cleanSymbol.substring(0, 3);
+    const char = text.toUpperCase();
+
+    const time = getPerfTime() - start;
+    if (ENABLE_PERF_LOGS && time > 0.1) {
+      logPerf(`[CHAR] Character extraction took ${time.toFixed(2)}ms`, {
+        symbol,
+      });
+    }
+    return char;
+  }, [symbol]);
 
   // Get background color (memoized)
-  const backgroundColor = useMemo(
-    () => {
-      const start = getPerfTime();
-      const color = getBackgroundColor(symbol);
-      const time = getPerfTime() - start;
-      if (ENABLE_PERF_LOGS && time > 0.1) {
-        logPerf(`[COLOR] Color calculation took ${time.toFixed(2)}ms`, {
-          symbol,
-        });
-      }
-      return color;
-    },
-    [symbol]
-  );
+  const backgroundColor = useMemo(() => {
+    const start = getPerfTime();
+    const color = getBackgroundColor(symbol);
+    const time = getPerfTime() - start;
+    if (ENABLE_PERF_LOGS && time > 0.1) {
+      logPerf(`[COLOR] Color calculation took ${time.toFixed(2)}ms`, {
+        symbol,
+      });
+    }
+    return color;
+  }, [symbol]);
 
   // Determine which icon to show
   // Show character icon if:
@@ -394,7 +400,7 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
       size,
       totalComponentTime: `${totalTime.toFixed(2)}ms`,
     });
-    
+
     if (shouldShowChar) {
       logPerf(`[RENDER] Character icon will be displayed`, {
         symbol,
@@ -409,7 +415,17 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
         hasLogoUrl: !!logoUrl,
       });
     }
-  }, [shouldShowChar, symbol, charIcon, size, logo, logoUrl, showUrlLogo, urlLoadError, backgroundColor]);
+  }, [
+    shouldShowChar,
+    symbol,
+    charIcon,
+    size,
+    logo,
+    logoUrl,
+    showUrlLogo,
+    urlLoadError,
+    backgroundColor,
+  ]);
 
   // Memoize container style
   const containerStyle = useMemo(
@@ -436,11 +452,20 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
       ) : (
         // Show logo (local or URL-based)
         <Image
-          source={showUrlLogo && logoUrl && !logo ? { uri: logoUrl, cache: 'force-cache' } : logo}
+          source={
+            showUrlLogo && logoUrl && !logo
+              ? { uri: logoUrl, cache: "force-cache" }
+              : logo
+          }
           style={memoizedImageStyle}
           onLoad={() => {
             // Image loaded successfully - cache the success
-            if (logoUrl && !logo && isLoadingUrl && !imageUrlCache.has(logoUrl)) {
+            if (
+              logoUrl &&
+              !logo &&
+              isLoadingUrl &&
+              !imageUrlCache.has(logoUrl)
+            ) {
               imageUrlCache.set(logoUrl, {
                 loaded: true,
                 timestamp: Date.now(),
@@ -449,11 +474,14 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
               setIsLoadingUrl(false);
               // Persist to AsyncStorage
               saveImageCacheToStorage();
-              logPerf(`[IMAGE LOADED] Successfully loaded and cached image for "${symbol}" (persisted)`, {
-                logoUrl,
-                symbol,
-                cacheSize: imageUrlCache.size,
-              });
+              logPerf(
+                `[IMAGE LOADED] Successfully loaded and cached image for "${symbol}" (persisted)`,
+                {
+                  logoUrl,
+                  symbol,
+                  cacheSize: imageUrlCache.size,
+                }
+              );
             }
           }}
           onError={() => {
@@ -469,11 +497,14 @@ const TokenIcon = ({ symbol, logo, logoUrl, style, imageStyle, size = 40 }) => {
               setShowUrlLogo(false);
               // Persist to AsyncStorage
               saveImageCacheToStorage();
-              logPerf(`[IMAGE ERROR] Failed to load image for "${symbol}", cached failure and showing character icon (persisted)`, {
-                logoUrl,
-                symbol,
-                cacheSize: imageUrlCache.size,
-              });
+              logPerf(
+                `[IMAGE ERROR] Failed to load image for "${symbol}", cached failure and showing character icon (persisted)`,
+                {
+                  logoUrl,
+                  symbol,
+                  cacheSize: imageUrlCache.size,
+                }
+              );
             }
           }}
         />
@@ -536,10 +567,12 @@ export const getTokenIconPerfStats = () => {
     perfStats.totalRenders > 0
       ? (perfStats.cacheHits / perfStats.totalRenders) * 100
       : 0;
-  
+
   const imageCacheHitRate =
     imageLoadStats.totalLoads + imageLoadStats.cacheHits > 0
-      ? (imageLoadStats.cacheHits / (imageLoadStats.totalLoads + imageLoadStats.cacheHits)) * 100
+      ? (imageLoadStats.cacheHits /
+          (imageLoadStats.totalLoads + imageLoadStats.cacheHits)) *
+        100
       : 0;
 
   return {
@@ -589,10 +622,17 @@ export const clearImageCache = async () => {
   imageUrlCache.clear();
   try {
     await AsyncStorage.removeItem(IMAGE_CACHE_STORAGE_KEY);
-    logPerf(`Image URL cache cleared (${cacheSize} entries removed from memory and storage)`);
+    logPerf(
+      `Image URL cache cleared (${cacheSize} entries removed from memory and storage)`
+    );
   } catch (error) {
-    console.error("[TokenIcon] Error clearing image cache from storage:", error);
-    logPerf(`Image URL cache cleared from memory (${cacheSize} entries), but storage clear failed`);
+    console.error(
+      "[TokenIcon] Error clearing image cache from storage:",
+      error
+    );
+    logPerf(
+      `Image URL cache cleared from memory (${cacheSize} entries), but storage clear failed`
+    );
   }
 };
 

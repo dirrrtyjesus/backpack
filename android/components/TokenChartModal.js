@@ -73,7 +73,7 @@ export const TokenChartModal = ({
 
       const tokenId = getTokenId(tokenSymbol);
       const periodConfig = getPeriodConfig(selectedPeriod);
-      console.log(`Fetching ${selectedPeriod} price data for ${tokenId}...`);
+      // console.log(`Fetching ${selectedPeriod} price data for ${tokenId}...`);
 
       const data = await fetchPriceHistoryForPeriod(tokenId, selectedPeriod);
       console.log(`Received ${data.length} price points for ${selectedPeriod}`);
