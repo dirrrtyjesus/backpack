@@ -1649,15 +1649,51 @@ function AppContent() {
               displayType = "unknown";
             }
 
+            // Get token symbol and mint address
             const tokenSymbol =
-              tx.tokenSymbol || tx.symbol || tx.token || "XNT";
+              tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol;
             const tokenMint = tx.tokenMint || tx.mint;
+
+            // Fetch token metadata from REST API (only for non-native tokens on Solana)
+            let tokenMetadata = null;
+            const isSolanaNetwork =
+              activeNetwork.id === "SOLANA" ||
+              activeNetwork.id === "SOLANA_DEVNET";
+            const isNativeToken =
+              tokenSymbol === "SOL" || tokenSymbol === "XNT";
+
+            if (isSolanaNetwork && !isNativeToken && tokenMint) {
+              tokenMetadata = await fetchTokenMetadata(tokenMint, true);
+            }
+
+            // Calculate USD value if we have token price
+            const valueUSD = tokenMetadata?.price
+              ? (amountNum * tokenMetadata.price).toFixed(2)
+              : null;
+
+            // Hide tokens not in database (likely scam/spam tokens)
+            if (
+              isSolanaNetwork &&
+              !isNativeToken &&
+              tokenMint &&
+              !tokenMetadata
+            ) {
+              return null; // This transaction will be filtered out
+            }
 
             return {
               id: tx.hash,
               type: displayType,
-              amount: amountNum,
-              token: tokenSymbol,
+              amount: amountNum.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 9,
+              }),
+              amountRaw: amountNum,
+              token: tokenMetadata?.symbol || tokenSymbol,
+              tokenName: null,
+              tokenIcon: tokenMetadata?.icon || null,
+              tokenPrice: tokenMetadata?.price || null,
+              valueUSD: valueUSD,
               signature: tx.hash,
               timestamp: isValidDate
                 ? date.toLocaleDateString("en-US", {
@@ -1667,18 +1703,42 @@ function AppContent() {
                   })
                 : "Unknown date",
               timestampDate: date,
-              tokenIcon: null,
-              tokenName: null,
-              tokenPrice: null,
-              valueUSD: null,
             };
           })
         );
 
+        // Filter out null values (hidden scam tokens)
+        const validTransactions = formattedTransactions.filter(
+          (tx) => tx !== null
+        );
+        const hiddenCount =
+          formattedTransactions.length - validTransactions.length;
+
+        if (hiddenCount > 0) {
+          console.log(
+            `🚫 Filtered out ${hiddenCount} unverified/scam token transactions`
+          );
+        }
+
+        // Filter out micro transactions (likely spam)
+        const MICRO_TRANSACTION_THRESHOLD = 0.001;
+        const nonMicroTransactions = validTransactions.filter((tx) => {
+          const amount = Math.abs(tx.amountRaw || 0);
+          return amount >= MICRO_TRANSACTION_THRESHOLD;
+        });
+        const microCount =
+          validTransactions.length - nonMicroTransactions.length;
+
+        if (microCount > 0) {
+          console.log(
+            `🚫 Filtered out ${microCount} micro transactions (dust/spam)`
+          );
+        }
+
         // Merge with existing transactions and remove duplicates
         const allTransactions = [...transactions];
 
-        formattedTransactions.forEach((newTx) => {
+        nonMicroTransactions.forEach((newTx) => {
           const existing = allTransactions.find((group) =>
             group.transactions.some((t) => t.id === newTx.id)
           );
