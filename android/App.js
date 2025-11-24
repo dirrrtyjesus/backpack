@@ -311,6 +311,17 @@ function AppContent() {
   const [wallets, setWallets] = useState([]);
   const [walletsLoaded, setWalletsLoaded] = useState(false);
   const [selectedWallet, setSelectedWallet] = useState(null);
+
+  // Efficient O(1) lookup index for wallet addresses - auto-updates with wallets array
+  const walletAddressIndex = useMemo(() => {
+    const index = new Set();
+    wallets.forEach((wallet) => {
+      if (wallet.publicKey) index.add(wallet.publicKey);
+      if (wallet.address) index.add(wallet.address);
+    });
+    return index;
+  }, [wallets]);
+
   const [accounts, setAccounts] = useState(MOCK_ACCOUNTS);
   const [selectedAccount, setSelectedAccount] = useState(MOCK_ACCOUNTS[0]);
   const [balance, setBalance] = useState("0");
@@ -397,9 +408,22 @@ function AppContent() {
   const ledgerCleanedUpRef = useRef(false); // Track if cleanup has already been completed
   const bleManagerRef = useRef(null); // BLE Manager instance for Bluetooth control
   const sendAddressInputRef = useRef(null); // Ref for send address TextInput
+  const ledgerScanAbortRef = useRef(false); // Flag to abort ongoing scan
+  const ledgerScanPausedRef = useRef(false); // Ref for real-time pause checking in loop
+  const [ledgerScanPaused, setLedgerScanPaused] = useState(false); // State for UI updates
+  const ledgerSkippedDuplicatesRef = useRef(0); // Count of skipped duplicate accounts
+  const [ledgerSelectedAccounts, setLedgerSelectedAccounts] = useState(
+    new Set()
+  ); // Multi-select: track selected account addresses
+  const [ledgerAddingAccounts, setLedgerAddingAccounts] = useState(false); // Progress: adding accounts in progress
+  const [ledgerAddProgress, setLedgerAddProgress] = useState({
+    current: 0,
+    total: 0,
+  }); // Progress: current/total accounts being added
   const [ledgerDerivationPatterns, setLedgerDerivationPatterns] = useState([
     "standard",
   ]); // Selected derivation path patterns (array for multi-select)
+  const [ledgerDeepScan, setLedgerDeepScan] = useState(false); // Deep scan mode (scan up to 50 accounts per path)
 
   // Send and Receive states
   const [sendAmount, setSendAmount] = useState("");
@@ -3242,27 +3266,9 @@ function AppContent() {
     setShowAddWalletModal(false);
     console.log("✓ Add wallet modal closed");
 
-    // Power cycle Bluetooth FIRST (doesn't require permissions)
+    // Request Bluetooth permissions
     console.log("");
-    console.log(
-      "🔄 Step 1: Power cycling Bluetooth to clear stale connections..."
-    );
-    console.log(
-      "   (This happens BEFORE permission check - no permissions needed)"
-    );
-    const cycled = await powerCycleBluetooth();
-    if (cycled) {
-      console.log("✅ Bluetooth power cycled successfully");
-    } else {
-      console.log(
-        "⚠️ Bluetooth power cycle not available (Android 13+ or failed)"
-      );
-      console.log("   User should manually toggle Bluetooth if issues persist");
-    }
-    console.log("");
-
-    // Request Bluetooth permissions after power cycle
-    console.log("📋 Step 2: Requesting Bluetooth permissions...");
+    console.log("📋 Step 1: Requesting Bluetooth permissions...");
     const hasPermission = await requestBluetoothPermissions();
     if (!hasPermission) {
       console.log("❌ Bluetooth permissions denied");
@@ -3279,86 +3285,14 @@ function AppContent() {
     console.log("");
 
     // Always show sheet and scan to allow selection
-    console.log("🔵 Step 3: Opening Ledger connection sheet...");
+    console.log("🔵 Step 2: Opening Ledger connection sheet...");
     ledgerSheetRef.current?.present();
     console.log("✓ Ledger sheet opened");
 
     console.log("");
-    console.log("🔍 Step 4: Starting BLE scan for Ledger devices...");
+    console.log("🔍 Step 3: Starting BLE scan for Ledger devices...");
     scanForLedger();
     console.log("==============================================");
-  };
-
-  // Bluetooth Power Cycle - Reset Bluetooth adapter to clear stale connections
-  const powerCycleBluetooth = async () => {
-    console.log("🔄 Attempting to power cycle Bluetooth adapter...");
-
-    try {
-      // Initialize BLE Manager if not already done
-      if (!bleManagerRef.current) {
-        bleManagerRef.current = new BleManager();
-        console.log("  ✓ BLE Manager initialized");
-      }
-
-      const manager = bleManagerRef.current;
-
-      // Check current Bluetooth state
-      const state = await manager.state();
-      console.log(`  📡 Current Bluetooth state: ${state}`);
-
-      if (state === "PoweredOn") {
-        // Try to disable Bluetooth (only works on Android <13)
-        try {
-          console.log("  ⏸ Disabling Bluetooth...");
-          await manager.disable();
-          console.log("  ✓ Bluetooth disabled");
-
-          // Wait for it to fully power down
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-
-          // Re-enable Bluetooth
-          console.log("  ▶ Re-enabling Bluetooth...");
-          await manager.enable();
-          console.log("  ✓ Bluetooth re-enabled");
-
-          // Wait for it to fully power up
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-
-          console.log("✅ Bluetooth power cycle complete!");
-          return true;
-        } catch (error) {
-          // Disable/enable not supported (Android 13+)
-          if (error.message && error.message.includes("not supported")) {
-            console.log(
-              "  ⚠ Bluetooth disable/enable not supported on this Android version"
-            );
-            console.log(
-              "  💡 User must manually toggle Bluetooth in system settings"
-            );
-
-            Toast.show({
-              type: "info",
-              text1: "Bluetooth Reset Required",
-              text2:
-                "Please toggle Bluetooth OFF then ON in your phone settings to clear stale connections",
-              position: "bottom",
-              visibilityTime: 5000,
-            });
-            return false;
-          }
-          throw error;
-        }
-      } else {
-        console.log(
-          `  ⚠ Bluetooth is not powered on (state: ${state}), skipping power cycle`
-        );
-        return false;
-      }
-    } catch (error) {
-      console.error("❌ Error during Bluetooth power cycle:", error);
-      console.error("  Error message:", error.message);
-      return false;
-    }
   };
 
   // Check BLE Status - Comprehensive diagnostic report
@@ -3660,7 +3594,9 @@ function AppContent() {
 
       setLedgerScanning(true);
       setLedgerAccounts([]);
+      setLedgerSelectedAccounts(new Set()); // Clear multi-select
       setDiscoveredDevices([]); // Clear previous results
+      ledgerSkippedDuplicatesRef.current = 0; // Reset skipped duplicates counter
       console.log("Starting Ledger Bluetooth scan...");
 
       const subscription = TransportBLE.listen({
@@ -3969,21 +3905,36 @@ function AppContent() {
         alternate: (i) => `44'/501'/0'/${i}'`, // Alternate (account last)
       };
 
-      // Scan all 30 accounts across all selected derivation patterns
-      const MAX_ACCOUNTS = 30;
+      // Scan all accounts across all selected derivation patterns
+      // Deep scan mode: scan up to 50 accounts per path
+      // Normal mode: scan up to 30 accounts per path with early stop at 5 consecutive empty
+      const MAX_ACCOUNTS = ledgerDeepScan ? 50 : 30;
       const allAccounts = [];
       const accountsWithBalance = [];
       const seenAddresses = new Set(); // Track unique addresses to avoid duplicates
 
+      // Reset abort flag and pause state at the start of scan
+      ledgerScanAbortRef.current = false;
+      ledgerScanPausedRef.current = false;
+      setLedgerScanPaused(false);
+      ledgerSkippedDuplicatesRef.current = 0;
+
       console.log(
-        `[Ledger Scan] Starting scan with ${ledgerDerivationPatterns.length} derivation pattern(s): ${ledgerDerivationPatterns.join(", ")}`
+        `[Ledger Scan] Starting ${ledgerDeepScan ? "DEEP SCAN" : "scan"} with ${ledgerDerivationPatterns.length} derivation pattern(s): ${ledgerDerivationPatterns.join(", ")}`
       );
+      console.log(`[Ledger Scan] Max accounts per pattern: ${MAX_ACCOUNTS}`);
 
       let totalScanned = 0;
       const totalToScan = MAX_ACCOUNTS * ledgerDerivationPatterns.length;
 
       // Scan each selected pattern
       for (const patternKey of ledgerDerivationPatterns) {
+        // Check if scan was aborted
+        if (ledgerScanAbortRef.current) {
+          console.log("[Ledger Scan] Scan aborted - stopping pattern scan");
+          break;
+        }
+
         const pathGenerator = DERIVATION_PATTERNS[patternKey];
         console.log(`\n[Ledger Scan] === Scanning ${patternKey} pattern ===`);
 
@@ -3991,6 +3942,12 @@ function AppContent() {
         const EARLY_STOP_THRESHOLD = 5;
 
         for (let i = 0; i < MAX_ACCOUNTS; i++) {
+          // Check if scan was aborted
+          if (ledgerScanAbortRef.current) {
+            console.log("[Ledger Scan] Scan aborted - stopping account scan");
+            break;
+          }
+
           totalScanned++;
           const derivationPath = pathGenerator(i);
           console.log(
@@ -4038,6 +3995,23 @@ function AppContent() {
             x1Balance: balanceInfo.x1,
           };
 
+          // Check if this account is already imported (O(1) lookup using Set)
+          const isAlreadyImported = walletAddressIndex.has(addressString);
+
+          if (isAlreadyImported) {
+            console.log(`  ⊙ Account already imported - skipping entirely`);
+            ledgerSkippedDuplicatesRef.current++;
+            // Don't add to any list, don't count as empty for early stop
+            continue;
+          }
+
+          // Wait while paused (use ref for real-time checking)
+          while (ledgerScanPausedRef.current) {
+            console.log("[Ledger Scan] Paused - waiting...");
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          // Only add non-imported accounts
           allAccounts.push(newAccount);
 
           if (balanceInfo.hasBalance) {
@@ -4061,7 +4035,11 @@ function AppContent() {
           setLedgerWalletProgress(totalScanned);
 
           // Early stop if we've seen 5 consecutive accounts with zero balance
-          if (consecutiveEmptyAccounts >= EARLY_STOP_THRESHOLD) {
+          // (only in normal mode, not deep scan)
+          if (
+            !ledgerDeepScan &&
+            consecutiveEmptyAccounts >= EARLY_STOP_THRESHOLD
+          ) {
             console.log(
               `\n[Ledger Scan] Stopping ${patternKey} pattern after ${EARLY_STOP_THRESHOLD} consecutive empty accounts`
             );
@@ -4118,11 +4096,27 @@ function AppContent() {
       );
 
       if (accountsWithBalance.length === 0) {
-        console.log(
-          `\n[Ledger Scan] ⚠️ No accounts with balance found, showing first 5 accounts`
-        );
-        // If no accounts with balance, show first 5 anyway
-        setLedgerAccounts(accounts.slice(0, 5));
+        // Check if all scanned accounts were already imported
+        if (
+          ledgerSkippedDuplicatesRef.current > 0 &&
+          allAccounts.length === 0
+        ) {
+          console.log(
+            `\n[Ledger Scan] ⚠️ All ${ledgerSkippedDuplicatesRef.current} accounts are already imported`
+          );
+          // Set empty array but we'll show a special message in UI
+          setLedgerAccounts([]);
+        } else {
+          console.log(
+            `\n[Ledger Scan] ⚠️ No accounts with balance found, showing first 5 accounts`
+          );
+          // If no accounts with balance, show first 5 anyway with display indices
+          const first5 = allAccounts.slice(0, 5).map((acc, i) => ({
+            ...acc,
+            displayIndex: i,
+          }));
+          setLedgerAccounts(first5);
+        }
       }
 
       // Reset progress to stop the scanning indicator
@@ -4466,8 +4460,13 @@ function AppContent() {
     console.log("=== ADDING ALL LEDGER WALLETS ===");
     console.log("Number of accounts to add:", ledgerAccounts.length);
 
+    // Show progress popup
+    setLedgerAddingAccounts(true);
+    setLedgerAddProgress({ current: 0, total: ledgerAccounts.length });
+
     const newWallets = [];
     const skippedAccounts = [];
+    let processedCount = 0;
 
     for (const account of ledgerAccounts) {
       // Check for duplicate wallet
@@ -4476,6 +4475,11 @@ function AppContent() {
       if (isDuplicate) {
         console.log(`Skipping duplicate account: ${account.address}`);
         skippedAccounts.push(account);
+        processedCount++;
+        setLedgerAddProgress({
+          current: processedCount,
+          total: ledgerAccounts.length,
+        });
         continue;
       }
 
@@ -4501,9 +4505,17 @@ function AppContent() {
         account.address,
         currentNetwork.providerId
       );
+
+      // Update progress
+      processedCount++;
+      setLedgerAddProgress({
+        current: processedCount,
+        total: ledgerAccounts.length,
+      });
     }
 
     if (newWallets.length === 0) {
+      setLedgerAddingAccounts(false);
       setLedgerError("All accounts have already been added.");
       return;
     }
@@ -4530,6 +4542,139 @@ function AppContent() {
       console.log(`Skipped ${skippedAccounts.length} duplicate(s)`);
     }
     console.log("=== END ADDING ALL LEDGER WALLETS ===");
+
+    // Hide progress popup
+    setLedgerAddingAccounts(false);
+
+    ledgerSheetRef.current?.dismiss();
+    setLedgerAccounts([]);
+
+    // Clean up BLE connection after accounts are added
+    cleanupLedgerBLE().catch((e) =>
+      console.log("Cleanup error (ignoring):", e.message)
+    );
+  };
+
+  // Toggle selection of a Ledger account for multi-select
+  const handleToggleLedgerAccountSelection = (account) => {
+    setLedgerSelectedAccounts((prevSelected) => {
+      const newSelected = new Set(prevSelected);
+      if (newSelected.has(account.address)) {
+        newSelected.delete(account.address);
+      } else {
+        newSelected.add(account.address);
+      }
+      return newSelected;
+    });
+  };
+
+  // Add selected Ledger accounts
+  const handleAddSelectedLedgerAccounts = async () => {
+    console.log("=== ADDING SELECTED LEDGER WALLETS ===");
+
+    // Filter accounts to only those selected
+    const selectedAccountsList = ledgerAccounts.filter((account) =>
+      ledgerSelectedAccounts.has(account.address)
+    );
+
+    console.log(
+      "Number of selected accounts to add:",
+      selectedAccountsList.length
+    );
+
+    if (selectedAccountsList.length === 0) {
+      setLedgerError("Please select at least one account to add.");
+      return;
+    }
+
+    // Show progress popup
+    setLedgerAddingAccounts(true);
+    setLedgerAddProgress({ current: 0, total: selectedAccountsList.length });
+
+    const newWallets = [];
+    const skippedAccounts = [];
+    let processedCount = 0;
+
+    for (const account of selectedAccountsList) {
+      // Check for duplicate wallet
+      const isDuplicate = wallets.some((w) => w.publicKey === account.address);
+
+      if (isDuplicate) {
+        console.log(`Skipping duplicate account: ${account.address}`);
+        skippedAccounts.push(account);
+        processedCount++;
+        setLedgerAddProgress({
+          current: processedCount,
+          total: selectedAccountsList.length,
+        });
+        continue;
+      }
+
+      const newWallet = {
+        id: Date.now() + account.displayIndex,
+        name: `Ledger ${account.displayIndex + 1}`,
+        address: account.address,
+        publicKey: account.address,
+        selected: false,
+        isLedger: true,
+        derivationPath: account.derivationPath,
+        ledgerDeviceId: ledgerDeviceId,
+        hideZeroBalanceTokens: false,
+      };
+
+      newWallets.push(newWallet);
+      console.log(
+        `Added account ${account.displayIndex + 1}: ${account.address}`
+      );
+
+      // Register each wallet with the transaction indexer
+      await registerWalletWithIndexer(
+        account.address,
+        currentNetwork.providerId
+      );
+
+      // Update progress
+      processedCount++;
+      setLedgerAddProgress({
+        current: processedCount,
+        total: selectedAccountsList.length,
+      });
+    }
+
+    if (newWallets.length === 0) {
+      setLedgerAddingAccounts(false);
+      setLedgerError("All selected accounts have already been added.");
+      return;
+    }
+
+    // Set the first new wallet as selected
+    if (newWallets.length > 0) {
+      newWallets[0].selected = true;
+    }
+
+    // Deselect all existing wallets and add all new wallets
+    const updatedWallets = [
+      ...wallets.map((w) => ({ ...w, selected: false })),
+      ...newWallets,
+    ];
+
+    setWallets(updatedWallets);
+    await saveWalletsToStorage(updatedWallets);
+
+    // Set the first new wallet as the selected wallet
+    setSelectedWallet(newWallets[0]);
+
+    console.log(`Successfully added ${newWallets.length} wallet(s)`);
+    if (skippedAccounts.length > 0) {
+      console.log(`Skipped ${skippedAccounts.length} duplicate(s)`);
+    }
+    console.log("=== END ADDING SELECTED LEDGER WALLETS ===");
+
+    // Hide progress popup
+    setLedgerAddingAccounts(false);
+
+    // Clear selection
+    setLedgerSelectedAccounts(new Set());
 
     ledgerSheetRef.current?.dismiss();
     setLedgerAccounts([]);
@@ -6230,6 +6375,92 @@ function AppContent() {
             </Pressable>
           </Modal>
 
+          {/* Ledger Adding Accounts Progress Modal */}
+          <Modal
+            visible={ledgerAddingAccounts}
+            transparent={true}
+            animationType="fade"
+          >
+            <View
+              style={{
+                flex: 1,
+                justifyContent: "center",
+                alignItems: "center",
+                backgroundColor: "rgba(0, 0, 0, 0.85)",
+              }}
+            >
+              <View
+                style={{
+                  backgroundColor: easterEggMode ? "#1a1a2e" : "#1a1a1a",
+                  borderRadius: 16,
+                  padding: 32,
+                  alignItems: "center",
+                  minWidth: 280,
+                  borderWidth: 2,
+                  borderColor: "#4A90E2",
+                }}
+              >
+                {/* Animated spinner */}
+                <ActivityIndicator size="large" color="#4A90E2" />
+
+                {/* Progress text */}
+                <Text
+                  style={{
+                    color: "#FFF",
+                    fontSize: 18,
+                    fontWeight: "600",
+                    marginTop: 20,
+                    textAlign: "center",
+                  }}
+                >
+                  Adding Accounts
+                </Text>
+
+                <Text
+                  style={{
+                    color: "#4A90E2",
+                    fontSize: 24,
+                    fontWeight: "bold",
+                    marginTop: 12,
+                  }}
+                >
+                  {ledgerAddProgress.current} / {ledgerAddProgress.total}
+                </Text>
+
+                {/* Progress bar */}
+                <View
+                  style={{
+                    width: 200,
+                    height: 6,
+                    backgroundColor: "rgba(74, 144, 226, 0.2)",
+                    borderRadius: 3,
+                    marginTop: 16,
+                    overflow: "hidden",
+                  }}
+                >
+                  <View
+                    style={{
+                      width: `${(ledgerAddProgress.current / ledgerAddProgress.total) * 100}%`,
+                      height: "100%",
+                      backgroundColor: "#4A90E2",
+                    }}
+                  />
+                </View>
+
+                <Text
+                  style={{
+                    color: "rgba(255, 255, 255, 0.6)",
+                    fontSize: 12,
+                    marginTop: 16,
+                    textAlign: "center",
+                  }}
+                >
+                  Please wait while we add your accounts...
+                </Text>
+              </View>
+            </View>
+          </Modal>
+
           {/* Import Wallet Modal */}
           <Modal
             visible={showImportWalletModal}
@@ -7070,7 +7301,16 @@ function AppContent() {
         >
           <View style={[styles.bottomSheetHeader, { paddingTop: 8 }]}>
             <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => ledgerSheetRef.current?.dismiss()}>
+            <TouchableOpacity
+              onPress={() => {
+                // Abort any ongoing scan
+                if (ledgerWalletProgress > 0) {
+                  ledgerScanAbortRef.current = true;
+                  console.log("[Ledger Scan] Scan aborted by user");
+                }
+                ledgerSheetRef.current?.dismiss();
+              }}
+            >
               <Text style={styles.bottomSheetClose}>✕</Text>
             </TouchableOpacity>
           </View>
@@ -7134,7 +7374,7 @@ function AppContent() {
                       {ledgerAccounts.length} Account
                       {ledgerAccounts.length > 1 ? "s" : ""} Found
                       {ledgerWalletProgress > 0 &&
-                        ` (Scanning ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length})`}
+                        ` (Scanning ${ledgerWalletProgress})`}
                     </Text>
                     <Text style={{ color: "#666", fontSize: 11 }}>
                       Scanned:{" "}
@@ -7150,41 +7390,84 @@ function AppContent() {
                   </View>
                 </View>
 
-                {/* Add All Accounts Button */}
+                {/* Add Selected/All Accounts Button */}
                 {ledgerAccounts.length > 1 && (
-                  <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
-                    <TouchableOpacity
-                      onPress={handleAddAllLedgerAccounts}
-                      style={{
-                        backgroundColor: "#4A90E2",
-                        borderRadius: 8,
-                        padding: 10,
-                        marginBottom: 8,
-                        borderWidth: 1,
-                        borderColor: "rgba(74, 144, 226, 0.3)",
-                      }}
-                    >
-                      <Text
+                  <View
+                    style={{ paddingHorizontal: 20, paddingTop: 8, gap: 8 }}
+                  >
+                    {/* Add Selected Button - shows when accounts are selected */}
+                    {ledgerSelectedAccounts.size > 0 && (
+                      <TouchableOpacity
+                        onPress={handleAddSelectedLedgerAccounts}
                         style={{
-                          color: "#FFFFFF",
-                          fontSize: 14,
-                          fontWeight: "600",
-                          textAlign: "center",
+                          backgroundColor: "#4A90E2",
+                          borderRadius: 8,
+                          padding: 10,
+                          marginBottom: 0,
+                          borderWidth: 1,
+                          borderColor: "rgba(74, 144, 226, 0.3)",
                         }}
                       >
-                        Add All {ledgerAccounts.length} Accounts
-                      </Text>
-                      <Text
+                        <Text
+                          style={{
+                            color: "#FFFFFF",
+                            fontSize: 14,
+                            fontWeight: "600",
+                            textAlign: "center",
+                          }}
+                        >
+                          Add {ledgerSelectedAccounts.size} Selected{" "}
+                          {ledgerSelectedAccounts.size === 1
+                            ? "Account"
+                            : "Accounts"}
+                        </Text>
+                        <Text
+                          style={{
+                            color: "rgba(255, 255, 255, 0.8)",
+                            fontSize: 11,
+                            textAlign: "center",
+                            marginTop: 2,
+                          }}
+                        >
+                          Tap accounts below to select/deselect
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                    {/* Add All Button - shows when no selections */}
+                    {ledgerSelectedAccounts.size === 0 && (
+                      <TouchableOpacity
+                        onPress={handleAddAllLedgerAccounts}
                         style={{
-                          color: "rgba(255, 255, 255, 0.8)",
-                          fontSize: 11,
-                          textAlign: "center",
-                          marginTop: 2,
+                          backgroundColor: "#4A90E2",
+                          borderRadius: 8,
+                          padding: 10,
+                          marginBottom: 0,
+                          borderWidth: 1,
+                          borderColor: "rgba(74, 144, 226, 0.3)",
                         }}
                       >
-                        Import all discovered accounts at once
-                      </Text>
-                    </TouchableOpacity>
+                        <Text
+                          style={{
+                            color: "#FFFFFF",
+                            fontSize: 14,
+                            fontWeight: "600",
+                            textAlign: "center",
+                          }}
+                        >
+                          Add All {ledgerAccounts.length} Accounts
+                        </Text>
+                        <Text
+                          style={{
+                            color: "rgba(255, 255, 255, 0.8)",
+                            fontSize: 11,
+                            textAlign: "center",
+                            marginTop: 2,
+                          }}
+                        >
+                          Or tap individual accounts to multi-select
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 )}
 
@@ -7195,97 +7478,135 @@ function AppContent() {
                     paddingHorizontal: 16,
                     paddingTop: 8,
                   }}
-                  renderItem={({ item }) => (
-                    <TouchableOpacity
-                      onPress={() => handleSelectLedgerAccount(item)}
-                      style={{
-                        backgroundColor: "#1a1a1a",
-                        borderRadius: 8,
-                        padding: 10,
-                        marginBottom: 8,
-                        borderWidth: 1,
-                        borderColor: "rgba(255, 255, 255, 0.08)",
-                      }}
-                    >
-                      <View
-                        style={{ flexDirection: "row", alignItems: "center" }}
+                  renderItem={({ item }) => {
+                    const isSelected = ledgerSelectedAccounts.has(item.address);
+                    return (
+                      <TouchableOpacity
+                        onPress={() => handleToggleLedgerAccountSelection(item)}
+                        onLongPress={() => handleSelectLedgerAccount(item)}
+                        style={{
+                          backgroundColor: "#1a1a1a",
+                          borderRadius: 8,
+                          padding: 10,
+                          marginBottom: 8,
+                          borderWidth: 2,
+                          borderColor: isSelected
+                            ? "#4A90E2"
+                            : "rgba(255, 255, 255, 0.08)",
+                        }}
                       >
-                        {/* Account Badge */}
                         <View
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 16,
-                            backgroundColor: "#4A90E2",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            marginRight: 10,
-                          }}
+                          style={{ flexDirection: "row", alignItems: "center" }}
                         >
-                          <Text
+                          {/* Checkbox */}
+                          <View
                             style={{
-                              color: "#FFF",
-                              fontSize: 14,
-                              fontWeight: "600",
+                              width: 22,
+                              height: 22,
+                              borderRadius: 11,
+                              borderWidth: 2,
+                              borderColor: isSelected
+                                ? "#4A90E2"
+                                : "rgba(255, 255, 255, 0.3)",
+                              backgroundColor: isSelected
+                                ? "#4A90E2"
+                                : "transparent",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              marginRight: 10,
                             }}
                           >
-                            {item.displayIndex + 1}
-                          </Text>
-                        </View>
+                            {isSelected && (
+                              <Text
+                                style={{
+                                  color: "#FFF",
+                                  fontSize: 14,
+                                  fontWeight: "bold",
+                                }}
+                              >
+                                ✓
+                              </Text>
+                            )}
+                          </View>
 
-                        {/* Account Info */}
-                        <View style={{ flex: 1 }}>
-                          <Text
+                          {/* Account Badge */}
+                          <View
                             style={{
-                              color: "#FFF",
-                              fontSize: 13,
-                              fontWeight: "500",
-                              marginBottom: 2,
+                              width: 32,
+                              height: 32,
+                              borderRadius: 16,
+                              backgroundColor: "#4A90E2",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              marginRight: 10,
                             }}
                           >
-                            {item.address.slice(0, 6)}...
-                            {item.address.slice(-4)}
-                          </Text>
-                          {(item.solanaBalance > 0 || item.x1Balance > 0) && (
-                            <View style={{ flexDirection: "row", gap: 8 }}>
-                              {item.solanaBalance > 0 && (
-                                <Text
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#4A90E2",
-                                    fontWeight: "500",
-                                  }}
-                                >
-                                  {item.solanaBalance.toFixed(3)} SOL
-                                </Text>
-                              )}
-                              {item.x1Balance > 0 && (
-                                <Text
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#4A90E2",
-                                    fontWeight: "500",
-                                  }}
-                                >
-                                  {item.x1Balance.toFixed(3)} XNT
-                                </Text>
-                              )}
-                            </View>
-                          )}
-                        </View>
+                            <Text
+                              style={{
+                                color: "#FFF",
+                                fontSize: 14,
+                                fontWeight: "600",
+                              }}
+                            >
+                              {item.displayIndex + 1}
+                            </Text>
+                          </View>
 
-                        {/* Arrow */}
-                        <Text
-                          style={{
-                            color: "rgba(255, 255, 255, 0.3)",
-                            fontSize: 18,
-                          }}
-                        >
-                          ›
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  )}
+                          {/* Account Info */}
+                          <View style={{ flex: 1 }}>
+                            <Text
+                              style={{
+                                color: "#FFF",
+                                fontSize: 13,
+                                fontWeight: "500",
+                                marginBottom: 2,
+                              }}
+                            >
+                              {item.address.slice(0, 6)}...
+                              {item.address.slice(-4)}
+                            </Text>
+                            {(item.solanaBalance > 0 || item.x1Balance > 0) && (
+                              <View style={{ flexDirection: "row", gap: 8 }}>
+                                {item.solanaBalance > 0 && (
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#4A90E2",
+                                      fontWeight: "500",
+                                    }}
+                                  >
+                                    {item.solanaBalance.toFixed(3)} SOL
+                                  </Text>
+                                )}
+                                {item.x1Balance > 0 && (
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#4A90E2",
+                                      fontWeight: "500",
+                                    }}
+                                  >
+                                    {item.x1Balance.toFixed(3)} XNT
+                                  </Text>
+                                )}
+                              </View>
+                            )}
+                          </View>
+
+                          {/* Arrow/Instructions */}
+                          <Text
+                            style={{
+                              color: "rgba(255, 255, 255, 0.3)",
+                              fontSize: 10,
+                              textAlign: "right",
+                            }}
+                          >
+                            {isSelected ? "✓" : "tap"}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  }}
                 />
               </>
             ) : ledgerScanning && discoveredDevices.length === 0 ? (
@@ -7400,6 +7721,60 @@ function AppContent() {
                       </View>
                     </View>
 
+                    {/* Deep Scan Checkbox */}
+                    <TouchableOpacity
+                      onPress={() => setLedgerDeepScan(!ledgerDeepScan)}
+                      style={{
+                        marginHorizontal: 20,
+                        marginTop: 16,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        paddingVertical: 12,
+                        paddingHorizontal: 16,
+                        backgroundColor: "#1a1a1a",
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: "rgba(255, 255, 255, 0.1)",
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 20,
+                          height: 20,
+                          borderRadius: 4,
+                          borderWidth: 2,
+                          borderColor: ledgerDeepScan ? "#4A90E2" : "#666",
+                          backgroundColor: ledgerDeepScan
+                            ? "#4A90E2"
+                            : "transparent",
+                          justifyContent: "center",
+                          alignItems: "center",
+                          marginRight: 12,
+                        }}
+                      >
+                        {ledgerDeepScan && (
+                          <Text style={{ color: "#FFF", fontSize: 14 }}>✓</Text>
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={{
+                            color: "#FFF",
+                            fontSize: 14,
+                            fontWeight: "600",
+                          }}
+                        >
+                          Deep Scan Mode
+                        </Text>
+                        <Text
+                          style={{ color: "#999", fontSize: 12, marginTop: 4 }}
+                        >
+                          Scan up to 50 accounts per path (normally stops at 5
+                          consecutive empty)
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+
                     {/* Bluetooth Settings Button */}
                     <TouchableOpacity
                       style={{
@@ -7433,8 +7808,19 @@ function AppContent() {
                 }
                 ListFooterComponent={
                   ledgerConnecting ? (
-                    // Wallet Discovery Progress Indicator - Simple centered design
-                    <View
+                    // Wallet Discovery Progress Indicator - Tappable to pause/resume
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (ledgerWalletProgress > 0) {
+                          const newPausedState = !ledgerScanPaused;
+                          ledgerScanPausedRef.current = newPausedState;
+                          setLedgerScanPaused(newPausedState);
+                          console.log(
+                            `[Ledger Scan] ${newPausedState ? "Paused" : "Resumed"} by user`
+                          );
+                        }
+                      }}
+                      activeOpacity={ledgerWalletProgress > 0 ? 0.7 : 1}
                       style={{
                         alignItems: "center",
                         paddingVertical: 24,
@@ -7443,19 +7829,35 @@ function AppContent() {
                     >
                       <Text
                         style={{
-                          color: "rgba(255, 255, 255, 0.6)",
+                          color: ledgerScanPaused
+                            ? "#FFA500"
+                            : "rgba(255, 255, 255, 0.6)",
                           fontSize: 13,
                           marginBottom: 12,
                           textAlign: "center",
+                          fontWeight: ledgerScanPaused ? "600" : "normal",
                         }}
                       >
-                        {ledgerWalletProgress > 0
-                          ? `Scanning accounts... ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length}`
-                          : "Connecting to Ledger..."}
+                        {ledgerScanPaused
+                          ? "⏸ Paused - Tap to resume"
+                          : ledgerWalletProgress > 0
+                            ? ledgerDeepScan
+                              ? `Scanning ${ledgerWalletProgress}`
+                              : `Scanning accounts... ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length}`
+                            : "Connecting to Ledger..."}
                       </Text>
                       {ledgerWalletProgress > 0 && (
                         <>
-                          <View
+                          <TouchableOpacity
+                            onPress={() => {
+                              const newPausedState = !ledgerScanPaused;
+                              ledgerScanPausedRef.current = newPausedState;
+                              setLedgerScanPaused(newPausedState);
+                              console.log(
+                                `[Ledger Scan] ${newPausedState ? "Paused" : "Resumed"} by user`
+                              );
+                            }}
+                            activeOpacity={0.7}
                             style={{
                               width: "100%",
                               height: 3,
@@ -7467,12 +7869,14 @@ function AppContent() {
                           >
                             <View
                               style={{
-                                width: `${(ledgerWalletProgress / 30) * 100}%`,
+                                width: `${(ledgerWalletProgress / (ledgerDeepScan ? 50 : 30) / ledgerDerivationPatterns.length) * 100}%`,
                                 height: "100%",
-                                backgroundColor: "#4A90E2",
+                                backgroundColor: ledgerScanPaused
+                                  ? "#FFA500"
+                                  : "#4A90E2",
                               }}
                             />
-                          </View>
+                          </TouchableOpacity>
                           <Text
                             style={{
                               color: "rgba(255, 255, 255, 0.4)",
@@ -7480,13 +7884,49 @@ function AppContent() {
                               textAlign: "center",
                             }}
                           >
-                            {ledgerAccounts
+                            {(ledgerAccounts || [])
                               .slice(0, ledgerWalletProgress)
                               .map((acc, i) => acc.address.slice(0, 4))
                               .join(" • ")}
                           </Text>
                         </>
                       )}
+                    </TouchableOpacity>
+                  ) : ledgerAccounts.length === 0 &&
+                    !ledgerConnecting &&
+                    ledgerSkippedDuplicatesRef.current > 0 ? (
+                    // Special message when all accounts are already imported
+                    <View
+                      style={{
+                        alignItems: "center",
+                        paddingVertical: 24,
+                        paddingHorizontal: 40,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: "#FFA500",
+                          fontSize: 14,
+                          fontWeight: "600",
+                          marginBottom: 8,
+                          textAlign: "center",
+                        }}
+                      >
+                        All Accounts Already Imported
+                      </Text>
+                      <Text
+                        style={{
+                          color: "rgba(255, 255, 255, 0.6)",
+                          fontSize: 12,
+                          textAlign: "center",
+                          lineHeight: 18,
+                        }}
+                      >
+                        All {ledgerSkippedDuplicatesRef.current} scanned
+                        accounts are already in your wallet.
+                        {"\n\n"}
+                        Tap an account below to add a fresh one.
+                      </Text>
                     </View>
                   ) : null
                 }
