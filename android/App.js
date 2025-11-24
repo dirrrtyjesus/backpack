@@ -322,6 +322,8 @@ function AppContent() {
   const [tokenPrice, setTokenPrice] = useState(null);
   const [tokens, setTokens] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [isIndexing, setIsIndexing] = useState(false);
+  const [indexingMessage, setIndexingMessage] = useState("");
   const [balanceCache, setBalanceCache] = useState({});
   const [gainLossCache, setGainLossCache] = useState({});
   const [currentNetwork, setCurrentNetwork] = useState(NETWORKS[0]);
@@ -1107,95 +1109,155 @@ function AppContent() {
     }
   };
 
-  // Fetch transactions
+  // Fetch transactions with on-demand indexing and polling
   const checkTransactions = async (network = null) => {
     if (!selectedWallet) return;
-    try {
-      const activeNetwork = network || currentNetwork;
 
-      // Guard: ensure activeNetwork exists
-      if (!activeNetwork) {
-        console.log("No active network available");
-        return;
+    const activeNetwork = network || currentNetwork;
+    if (!activeNetwork) {
+      console.log("No active network available");
+      return;
+    }
+
+    try {
+      setIsIndexing(true);
+      setIndexingMessage("Checking for new transactions...");
+
+      // Step 1: Trigger on-demand indexing
+      console.log("🎯 Triggering on-demand indexing...");
+      const indexUrl = `${API_SERVER}/wallets/index-now`;
+
+      const indexResponse = await fetch(indexUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          address: selectedWallet.publicKey,
+          network: activeNetwork.providerId,
+        }),
+      });
+
+      const indexResult = await indexResponse.json();
+      console.log("✅ Indexing result:", indexResult);
+
+      if (indexResult.indexed > 0) {
+        setIndexingMessage(`Found ${indexResult.indexed} new transactions`);
+      } else {
+        setIndexingMessage("No new transactions found");
       }
 
-      const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
-      console.log("Fetching fresh transactions from:", url);
+      // Step 2: Poll for transactions (up to 30 seconds)
+      const POLL_INTERVAL = 5000; // 5 seconds
+      const MAX_POLLS = 6; // 30 seconds total
+      let pollCount = 0;
+      let transactionsFound = false;
 
-      const response = await fetch(url);
-      console.log(
-        `Transactions API Response: ${response.status} ${response.statusText}`
-      );
-      const data = await response.json();
-      console.log(
-        `Received ${data?.transactions?.length || 0} transactions from API`
-      );
-      console.log("Full API response:", JSON.stringify(data, null, 2));
+      const pollTransactions = async () => {
+        pollCount++;
+        console.log(`📊 Polling attempt ${pollCount}/${MAX_POLLS}...`);
 
-      if (data && data.transactions) {
-        const formattedTransactions = data.transactions.map((tx) => {
-          // Handle both Unix timestamp (number) and ISO string formats
-          let date;
-          if (typeof tx.timestamp === "string") {
-            date = new Date(tx.timestamp);
-          } else if (typeof tx.timestamp === "number") {
-            date = new Date(tx.timestamp * 1000);
-          } else {
-            date = new Date();
-          }
-          const isValidDate = !isNaN(date.getTime());
-
-          // Parse amount - could be string or number
-          const amountNum =
-            typeof tx.amount === "string"
-              ? parseFloat(tx.amount)
-              : tx.amount || 0;
-
-          // Map transaction type to display type
-          let displayType = "received";
-          if (tx.type === "SEND") {
-            displayType = "sent";
-          } else if (tx.type === "RECEIVE") {
-            displayType = "received";
-          } else if (tx.type === "SWAP") {
-            displayType = "swap";
-          } else if (tx.type === "UNKNOWN") {
-            displayType = "unknown";
-          }
-
-          return {
-            id: tx.hash || tx.signature,
-            type: displayType,
-            amount: amountNum.toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 9,
-            }),
-            token: tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol,
-            timestamp: isValidDate
-              ? date.toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                  year: "numeric",
-                  hour: "numeric",
-                  minute: "2-digit",
-                  hour12: true,
-                })
-              : "Unknown",
-            fee: tx.fee || "0.000001650",
-            signature: tx.hash || tx.signature,
-          };
-        });
-
-        console.log(
-          `Setting ${formattedTransactions.length} formatted transactions to state`
+        setIndexingMessage(
+          `Loading transactions (${pollCount}/${MAX_POLLS})...`
         );
-        console.log("First transaction:", formattedTransactions[0]);
-        setTransactions(formattedTransactions);
-      } else {
-        console.log("No transactions in response or invalid response format");
+
+        const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        console.log(`Received ${data?.transactions?.length || 0} transactions`);
+
+        if (data && data.transactions && data.transactions.length > 0) {
+          // Transactions found!
+          transactionsFound = true;
+
+          const formattedTransactions = data.transactions.map((tx) => {
+            let date;
+            if (typeof tx.timestamp === "string") {
+              date = new Date(tx.timestamp);
+            } else if (typeof tx.timestamp === "number") {
+              date = new Date(tx.timestamp * 1000);
+            } else {
+              date = new Date();
+            }
+            const isValidDate = !isNaN(date.getTime());
+
+            const amountNum =
+              typeof tx.amount === "string"
+                ? parseFloat(tx.amount)
+                : tx.amount || 0;
+
+            let displayType = "received";
+            if (tx.type === "SEND") {
+              displayType = "sent";
+            } else if (tx.type === "RECEIVE") {
+              displayType = "received";
+            } else if (tx.type === "SWAP") {
+              displayType = "swap";
+            } else if (tx.type === "UNKNOWN") {
+              displayType = "unknown";
+            }
+
+            return {
+              id: tx.hash || tx.signature,
+              type: displayType,
+              amount: amountNum.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 9,
+              }),
+              token: tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol,
+              timestamp: isValidDate
+                ? date.toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                    hour12: true,
+                  })
+                : "Unknown",
+              fee: tx.fee || "0.000001650",
+              signature: tx.hash || tx.signature,
+            };
+          });
+
+          console.log(
+            `✅ Setting ${formattedTransactions.length} transactions to state`
+          );
+          setTransactions(formattedTransactions);
+          setIndexingMessage(
+            `Loaded ${formattedTransactions.length} transactions`
+          );
+          setIsIndexing(false);
+          return true; // Stop polling
+        } else {
+          // No transactions yet
+          if (pollCount >= MAX_POLLS) {
+            // Timeout - stop polling
+            console.log("⏱️  Polling timeout - no transactions found");
+            setIndexingMessage("No activity to display");
+            setIsIndexing(false);
+            setTransactions([]);
+            return true; // Stop polling
+          } else {
+            // Continue polling
+            return false;
+          }
+        }
+      };
+
+      // Start polling loop
+      while (!transactionsFound && pollCount < MAX_POLLS) {
+        const shouldStop = await pollTransactions();
+        if (shouldStop) break;
+
+        // Wait 5 seconds before next poll
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
       }
     } catch (error) {
       console.error("Error checking transactions:", error);
+      setIndexingMessage("Error loading transactions");
+      setIsIndexing(false);
     }
   };
 
@@ -5930,12 +5992,22 @@ function AppContent() {
               </View>
 
               {/* Transactions List */}
-              {transactions.length === 0 ? (
+              {isIndexing ? (
+                <>
+                  <View style={styles.emptyStateSpacer} />
+                  <View style={styles.emptyStateContainer}>
+                    <ActivityIndicator size="large" color="#4A90E2" />
+                    <Text style={[styles.emptyStateText, { marginTop: 20 }]}>
+                      {indexingMessage}
+                    </Text>
+                  </View>
+                </>
+              ) : transactions.length === 0 ? (
                 <>
                   <View style={styles.emptyStateSpacer} />
                   <View style={styles.emptyStateContainer}>
                     <Text style={styles.emptyStateText}>
-                      No transactions yet
+                      {indexingMessage || "No transactions yet"}
                     </Text>
                     <Text style={styles.emptyStateSubtext}>
                       Your transaction history will appear here

@@ -29,6 +29,7 @@ const https = require("https");
 const url = require("url");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
+const { indexWalletOnDemand } = require("./transaction-indexer-on-demand");
 
 const PORT = 4000;
 const X1_MAINNET_RPC_URL = "https://rpc.mainnet.x1.xyz";
@@ -1178,6 +1179,67 @@ const server = http.createServer((req, res) => {
         );
       } catch (error) {
         console.error(`❌ Update last indexed error: ${error.message}`);
+        res.writeHead(500);
+        res.end(
+          JSON.stringify({
+            error: "Internal Server Error",
+            message: error.message,
+          })
+        );
+      }
+    });
+    return;
+  }
+
+  // Handle /wallets/index-now endpoint for on-demand indexing
+  // This is called when user taps "Activity" in the mobile app
+  if (pathname === "/wallets/index-now" && req.method === "POST") {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk.toString();
+    });
+
+    req.on("end", async () => {
+      try {
+        const requestData = JSON.parse(body);
+        const { address, network = "X1-testnet" } = requestData;
+
+        if (!address) {
+          res.writeHead(400);
+          res.end(
+            JSON.stringify({
+              error: "Bad Request",
+              message: "Required field: address",
+            })
+          );
+          return;
+        }
+
+        console.log(
+          `\n🎯 On-demand indexing triggered for: ${address.substring(0, 8)}... (${network})`
+        );
+
+        // Call the on-demand indexer
+        const result = await indexWalletOnDemand(address, network);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(
+            {
+              success: result.success,
+              indexed: result.indexed,
+              duplicates: result.duplicates,
+              errors: result.errors,
+              totalSignatures: result.totalSignatures,
+              message: result.message,
+            },
+            null,
+            2
+          )
+        );
+      } catch (error) {
+        console.error(`❌ On-demand indexing error: ${error.message}`);
         res.writeHead(500);
         res.end(
           JSON.stringify({
