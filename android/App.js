@@ -71,7 +71,6 @@ import TokenIcon, { clearImageCache } from "./src/components/TokenIcon";
 import QRCode from "react-native-qrcode-svg";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import TransportBLE from "@ledgerhq/react-native-hw-transport-ble";
-import { BleManager } from "react-native-ble-plx";
 import AppSolana from "@ledgerhq/hw-app-solana";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
@@ -84,6 +83,7 @@ import { PinSetup } from "./src/auth/PinSetup";
 import { PinUnlock } from "./src/auth/PinUnlock";
 import { ChangePin } from "./src/auth/ChangePin";
 import { BiometricSettings } from "./src/auth/BiometricSettings";
+import ConnectLedgerPage from "./components/ConnectLedgerPage";
 
 // Import Toast notifications
 import Toast from "react-native-toast-message";
@@ -322,8 +322,6 @@ function AppContent() {
   const [tokenPrice, setTokenPrice] = useState(null);
   const [tokens, setTokens] = useState([]);
   const [transactions, setTransactions] = useState([]);
-  const [isIndexing, setIsIndexing] = useState(false);
-  const [indexingMessage, setIndexingMessage] = useState("");
   const [balanceCache, setBalanceCache] = useState({});
   const [gainLossCache, setGainLossCache] = useState({});
   const [currentNetwork, setCurrentNetwork] = useState(NETWORKS[0]);
@@ -395,11 +393,7 @@ function AppContent() {
   const ledgerScanSubscriptionRef = useRef(null); // Store scan subscription for cleanup
   const ledgerCleaningRef = useRef(false); // Prevent concurrent cleanup
   const ledgerCleanedUpRef = useRef(false); // Track if cleanup has already been completed
-  const bleManagerRef = useRef(null); // BLE Manager instance for Bluetooth control
   const sendAddressInputRef = useRef(null); // Ref for send address TextInput
-  const [ledgerDerivationPatterns, setLedgerDerivationPatterns] = useState([
-    "standard",
-  ]); // Selected derivation path patterns (array for multi-select)
 
   // Send and Receive states
   const [sendAmount, setSendAmount] = useState("");
@@ -702,47 +696,6 @@ function AppContent() {
       }
     };
     checkAuth();
-  }, []);
-
-  // Clean up any stale BLE connections on app startup
-  useEffect(() => {
-    const cleanupStartupBLE = async () => {
-      console.log("🔵 App startup: Cleaning up any stale BLE connections...");
-
-      try {
-        // Unsubscribe from any existing scans
-        if (ledgerScanSubscriptionRef.current) {
-          try {
-            ledgerScanSubscriptionRef.current.unsubscribe();
-            ledgerScanSubscriptionRef.current = null;
-            console.log("  ✓ Cleared scan subscription");
-          } catch (e) {
-            console.log("  ⚠ Error clearing scan subscription:", e.message);
-          }
-        }
-
-        // Close any existing transport connection
-        if (ledgerTransportRef.current) {
-          try {
-            await ledgerTransportRef.current.close();
-            console.log("  ✓ Closed existing transport");
-          } catch (e) {
-            console.log("  ⚠ Error closing transport:", e.message);
-          }
-          ledgerTransportRef.current = null;
-        }
-
-        // Reset cleanup flags
-        ledgerCleaningRef.current = false;
-        ledgerCleanedUpRef.current = false;
-
-        console.log("🔵 Startup BLE cleanup complete (no delay on startup)");
-      } catch (error) {
-        console.error("Error during startup BLE cleanup:", error);
-      }
-    };
-
-    cleanupStartupBLE();
   }, []);
 
   // Check biometric availability
@@ -1109,69 +1062,72 @@ function AppContent() {
     }
   };
 
-  // Fetch transactions with on-demand indexing and polling
-  const checkTransactions = async (network = null) => {
-    if (!selectedWallet) return;
-
-    const activeNetwork = network || currentNetwork;
-    if (!activeNetwork) {
-      console.log("No active network available");
-      return;
-    }
-
+  // Fetch token metadata from REST API
+  const fetchTokenMetadata = async (tokenSymbol) => {
     try {
-      setIsIndexing(true);
-      setIndexingMessage("Checking for new transactions...");
+      console.log(`[Token API] Fetching metadata for: ${tokenSymbol}`);
+      const response = await fetch(
+        `${API_SERVER}/tokens?symbol=${encodeURIComponent(tokenSymbol)}&verified=true`
+      );
 
-      // Step 1: Trigger on-demand indexing
-      console.log("🎯 Triggering on-demand indexing...");
-      const indexUrl = `${API_SERVER}/wallets/index-now`;
-
-      const indexResponse = await fetch(indexUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          address: selectedWallet.publicKey,
-          network: activeNetwork.providerId,
-        }),
-      });
-
-      const indexResult = await indexResponse.json();
-      console.log("✅ Indexing result:", indexResult);
-
-      if (indexResult.indexed > 0) {
-        setIndexingMessage(`Found ${indexResult.indexed} new transactions`);
-      } else {
-        setIndexingMessage("No new transactions found");
+      if (!response.ok) {
+        console.log(
+          `[Token API] Failed to fetch token metadata: ${response.status}`
+        );
+        return null;
       }
 
-      // Step 2: Poll for transactions (up to 30 seconds)
-      const POLL_INTERVAL = 5000; // 5 seconds
-      const MAX_POLLS = 6; // 30 seconds total
-      let pollCount = 0;
-      let transactionsFound = false;
+      const data = await response.json();
 
-      const pollTransactions = async () => {
-        pollCount++;
-        console.log(`📊 Polling attempt ${pollCount}/${MAX_POLLS}...`);
+      if (data && data.tokens && data.tokens.length > 0) {
+        const token = data.tokens[0]; // Use first (highest market cap) result
+        console.log(`[Token API] Found token: ${token.name} ($${token.price})`);
+        return {
+          name: token.name,
+          symbol: token.symbol,
+          icon: token.icon,
+          price: token.price,
+          mint: token.mint,
+        };
+      }
 
-        setIndexingMessage(
-          `Loading transactions (${pollCount}/${MAX_POLLS})...`
-        );
+      console.log(`[Token API] No token found for: ${tokenSymbol}`);
+      return null;
+    } catch (error) {
+      console.error(`[Token API] Error fetching token metadata:`, error);
+      return null;
+    }
+  };
 
-        const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
-        const response = await fetch(url);
-        const data = await response.json();
+  // Fetch transactions
+  const checkTransactions = async (network = null) => {
+    if (!selectedWallet) return;
+    try {
+      const activeNetwork = network || currentNetwork;
 
-        console.log(`Received ${data?.transactions?.length || 0} transactions`);
+      // Guard: ensure activeNetwork exists
+      if (!activeNetwork) {
+        console.log("No active network available");
+        return;
+      }
 
-        if (data && data.transactions && data.transactions.length > 0) {
-          // Transactions found!
-          transactionsFound = true;
+      const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
+      console.log("Fetching fresh transactions from:", url);
 
-          const formattedTransactions = data.transactions.map((tx) => {
+      const response = await fetch(url);
+      console.log(
+        `Transactions API Response: ${response.status} ${response.statusText}`
+      );
+      const data = await response.json();
+      console.log(
+        `Received ${data?.transactions?.length || 0} transactions from API`
+      );
+      console.log("Full API response:", JSON.stringify(data, null, 2));
+
+      if (data && data.transactions) {
+        const formattedTransactions = await Promise.all(
+          data.transactions.map(async (tx) => {
+            // Handle both Unix timestamp (number) and ISO string formats
             let date;
             if (typeof tx.timestamp === "string") {
               date = new Date(tx.timestamp);
@@ -1182,11 +1138,13 @@ function AppContent() {
             }
             const isValidDate = !isNaN(date.getTime());
 
+            // Parse amount - could be string or number
             const amountNum =
               typeof tx.amount === "string"
                 ? parseFloat(tx.amount)
                 : tx.amount || 0;
 
+            // Map transaction type to display type
             let displayType = "received";
             if (tx.type === "SEND") {
               displayType = "sent";
@@ -1198,6 +1156,27 @@ function AppContent() {
               displayType = "unknown";
             }
 
+            // Get token symbol (fallback to native token if not specified)
+            const tokenSymbol =
+              tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol;
+
+            // Fetch token metadata from REST API (only for non-native tokens on Solana)
+            let tokenMetadata = null;
+            const isSolanaNetwork =
+              activeNetwork.id === "SOLANA" ||
+              activeNetwork.id === "SOLANA_DEVNET";
+            const isNativeToken =
+              tokenSymbol === "SOL" || tokenSymbol === "XNT";
+
+            if (isSolanaNetwork && !isNativeToken) {
+              tokenMetadata = await fetchTokenMetadata(tokenSymbol);
+            }
+
+            // Calculate USD value if we have token price
+            const valueUSD = tokenMetadata?.price
+              ? (amountNum * tokenMetadata.price).toFixed(2)
+              : null;
+
             return {
               id: tx.hash || tx.signature,
               type: displayType,
@@ -1205,7 +1184,12 @@ function AppContent() {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 9,
               }),
-              token: tx.tokenSymbol || tx.symbol || getNativeTokenInfo().symbol,
+              amountRaw: amountNum, // Keep raw amount for calculations
+              token: tokenSymbol,
+              tokenName: tokenMetadata?.name || tx.tokenName || null,
+              tokenIcon: tokenMetadata?.icon || null,
+              tokenPrice: tokenMetadata?.price || null,
+              valueUSD: valueUSD,
               timestamp: isValidDate
                 ? date.toLocaleDateString("en-US", {
                     month: "short",
@@ -1219,45 +1203,19 @@ function AppContent() {
               fee: tx.fee || "0.000001650",
               signature: tx.hash || tx.signature,
             };
-          });
+          })
+        );
 
-          console.log(
-            `✅ Setting ${formattedTransactions.length} transactions to state`
-          );
-          setTransactions(formattedTransactions);
-          setIndexingMessage(
-            `Loaded ${formattedTransactions.length} transactions`
-          );
-          setIsIndexing(false);
-          return true; // Stop polling
-        } else {
-          // No transactions yet
-          if (pollCount >= MAX_POLLS) {
-            // Timeout - stop polling
-            console.log("⏱️  Polling timeout - no transactions found");
-            setIndexingMessage("No activity to display");
-            setIsIndexing(false);
-            setTransactions([]);
-            return true; // Stop polling
-          } else {
-            // Continue polling
-            return false;
-          }
-        }
-      };
-
-      // Start polling loop
-      while (!transactionsFound && pollCount < MAX_POLLS) {
-        const shouldStop = await pollTransactions();
-        if (shouldStop) break;
-
-        // Wait 5 seconds before next poll
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+        console.log(
+          `Setting ${formattedTransactions.length} formatted transactions to state`
+        );
+        console.log("First transaction:", formattedTransactions[0]);
+        setTransactions(formattedTransactions);
+      } else {
+        console.log("No transactions in response or invalid response format");
       }
     } catch (error) {
       console.error("Error checking transactions:", error);
-      setIndexingMessage("Error loading transactions");
-      setIsIndexing(false);
     }
   };
 
@@ -2440,6 +2398,15 @@ function AppContent() {
                 ) {
                   errorMessage +=
                     "Communication error (Invalid Tag). Please update your Ledger firmware and Solana app, or try a different cable/connection.";
+                } else if (
+                  ledgerError.message &&
+                  ledgerError.message.includes("BleError")
+                ) {
+                  // Show error toast - use setLedgerError to display on top of sheets
+                  setLedgerError(
+                    "Bluetooth Error: Please open Settings and toggle Bluetooth OFF then ON."
+                  );
+                  return;
                 } else if (ledgerError.message) {
                   errorMessage += ledgerError.message;
                 } else {
@@ -2607,8 +2574,11 @@ function AppContent() {
                   ledgerError.message &&
                   ledgerError.message.includes("BleError")
                 ) {
-                  errorMessage +=
-                    "Bluetooth connection failed. Please ensure Ledger is connected via Bluetooth.";
+                  // Show error toast - use setLedgerError to display on top of sheets
+                  setLedgerError(
+                    "Bluetooth Error: Please open Settings and toggle Bluetooth OFF then ON."
+                  );
+                  return;
                 } else {
                   errorMessage +=
                     ledgerError.message ||
@@ -3235,37 +3205,11 @@ function AppContent() {
   };
 
   const handleShowLedger = async () => {
-    console.log("==============================================");
-    console.log("🔵 CONNECT LEDGER FLOW STARTED");
-    console.log("==============================================");
-
     setShowAddWalletModal(false);
-    console.log("✓ Add wallet modal closed");
 
-    // Power cycle Bluetooth FIRST (doesn't require permissions)
-    console.log("");
-    console.log(
-      "🔄 Step 1: Power cycling Bluetooth to clear stale connections..."
-    );
-    console.log(
-      "   (This happens BEFORE permission check - no permissions needed)"
-    );
-    const cycled = await powerCycleBluetooth();
-    if (cycled) {
-      console.log("✅ Bluetooth power cycled successfully");
-    } else {
-      console.log(
-        "⚠️ Bluetooth power cycle not available (Android 13+ or failed)"
-      );
-      console.log("   User should manually toggle Bluetooth if issues persist");
-    }
-    console.log("");
-
-    // Request Bluetooth permissions after power cycle
-    console.log("📋 Step 2: Requesting Bluetooth permissions...");
+    // Request Bluetooth permissions first
     const hasPermission = await requestBluetoothPermissions();
     if (!hasPermission) {
-      console.log("❌ Bluetooth permissions denied");
       Toast.show({
         type: "error",
         text1: "Permissions Required",
@@ -3275,235 +3219,10 @@ function AppContent() {
       setShowAddWalletModal(true);
       return;
     }
-    console.log("✅ Bluetooth permissions granted");
-    console.log("");
 
     // Always show sheet and scan to allow selection
-    console.log("🔵 Step 3: Opening Ledger connection sheet...");
     ledgerSheetRef.current?.present();
-    console.log("✓ Ledger sheet opened");
-
-    console.log("");
-    console.log("🔍 Step 4: Starting BLE scan for Ledger devices...");
     scanForLedger();
-    console.log("==============================================");
-  };
-
-  // Bluetooth Power Cycle - Reset Bluetooth adapter to clear stale connections
-  const powerCycleBluetooth = async () => {
-    console.log("🔄 Attempting to power cycle Bluetooth adapter...");
-
-    try {
-      // Initialize BLE Manager if not already done
-      if (!bleManagerRef.current) {
-        bleManagerRef.current = new BleManager();
-        console.log("  ✓ BLE Manager initialized");
-      }
-
-      const manager = bleManagerRef.current;
-
-      // Check current Bluetooth state
-      const state = await manager.state();
-      console.log(`  📡 Current Bluetooth state: ${state}`);
-
-      if (state === "PoweredOn") {
-        // Try to disable Bluetooth (only works on Android <13)
-        try {
-          console.log("  ⏸ Disabling Bluetooth...");
-          await manager.disable();
-          console.log("  ✓ Bluetooth disabled");
-
-          // Wait for it to fully power down
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-
-          // Re-enable Bluetooth
-          console.log("  ▶ Re-enabling Bluetooth...");
-          await manager.enable();
-          console.log("  ✓ Bluetooth re-enabled");
-
-          // Wait for it to fully power up
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-
-          console.log("✅ Bluetooth power cycle complete!");
-          return true;
-        } catch (error) {
-          // Disable/enable not supported (Android 13+)
-          if (error.message && error.message.includes("not supported")) {
-            console.log(
-              "  ⚠ Bluetooth disable/enable not supported on this Android version"
-            );
-            console.log(
-              "  💡 User must manually toggle Bluetooth in system settings"
-            );
-
-            Toast.show({
-              type: "info",
-              text1: "Bluetooth Reset Required",
-              text2:
-                "Please toggle Bluetooth OFF then ON in your phone settings to clear stale connections",
-              position: "bottom",
-              visibilityTime: 5000,
-            });
-            return false;
-          }
-          throw error;
-        }
-      } else {
-        console.log(
-          `  ⚠ Bluetooth is not powered on (state: ${state}), skipping power cycle`
-        );
-        return false;
-      }
-    } catch (error) {
-      console.error("❌ Error during Bluetooth power cycle:", error);
-      console.error("  Error message:", error.message);
-      return false;
-    }
-  };
-
-  // Check BLE Status - Comprehensive diagnostic report
-  const checkBLEStatus = async () => {
-    console.log("");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("📊 BLUETOOTH STATUS REPORT");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("");
-
-    try {
-      // Initialize BLE Manager if not already done
-      if (!bleManagerRef.current) {
-        bleManagerRef.current = new BleManager();
-        console.log("  ℹ️  BLE Manager initialized for status check");
-      }
-
-      const manager = bleManagerRef.current;
-
-      // 1. Bluetooth Adapter State
-      console.log("1️⃣  BLUETOOTH ADAPTER STATE:");
-      const state = await manager.state();
-      console.log(`   State: ${state}`);
-      console.log(
-        `   ${state === "PoweredOn" ? "✅" : "❌"} Adapter is ${state === "PoweredOn" ? "POWERED ON" : "NOT powered on"}`
-      );
-      console.log("");
-
-      // 2. App Bluetooth Permissions
-      console.log("2️⃣  BLUETOOTH PERMISSIONS:");
-      try {
-        const scanGranted = await PermissionsAndroid.check(
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN
-        );
-        const connectGranted = await PermissionsAndroid.check(
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
-        );
-        console.log(
-          `   BLUETOOTH_SCAN: ${scanGranted ? "✅ GRANTED" : "❌ DENIED"}`
-        );
-        console.log(
-          `   BLUETOOTH_CONNECT: ${connectGranted ? "✅ GRANTED" : "❌ DENIED"}`
-        );
-      } catch (permErr) {
-        console.log(`   ⚠️  Could not check permissions: ${permErr.message}`);
-      }
-      console.log("");
-
-      // 3. Connected Devices
-      console.log("3️⃣  CONNECTED DEVICES:");
-      try {
-        const connectedDevices = await manager.connectedDevices([]);
-        if (connectedDevices.length > 0) {
-          console.log(
-            `   Found ${connectedDevices.length} connected device(s):`
-          );
-          connectedDevices.forEach((device, index) => {
-            console.log(`   ${index + 1}. ${device.name || "Unknown"}`);
-            console.log(`      ID: ${device.id}`);
-            console.log(`      RSSI: ${device.rssi || "N/A"}`);
-          });
-        } else {
-          console.log("   ℹ️  No devices currently connected");
-        }
-      } catch (devErr) {
-        console.log(
-          `   ⚠️  Could not get connected devices: ${devErr.message}`
-        );
-      }
-      console.log("");
-
-      // 4. App BLE State
-      console.log("4️⃣  APP BLE STATE:");
-      console.log(
-        `   Transport Ref: ${ledgerTransportRef.current ? "✅ EXISTS" : "❌ NULL"}`
-      );
-      if (ledgerTransportRef.current) {
-        try {
-          console.log(
-            `   Transport Device: ${ledgerTransportRef.current.device?.name || "Unknown"}`
-          );
-          console.log(
-            `   Transport ID: ${ledgerTransportRef.current.device?.id || "Unknown"}`
-          );
-        } catch (e) {
-          console.log("   Transport exists but error reading details");
-        }
-      }
-      console.log(
-        `   Scan Subscription: ${ledgerScanSubscriptionRef.current ? "✅ ACTIVE" : "❌ INACTIVE"}`
-      );
-      console.log(
-        `   Scanning Flag: ${ledgerScanning ? "✅ TRUE" : "❌ FALSE"}`
-      );
-      console.log(
-        `   Connecting Flag: ${ledgerConnecting ? "✅ TRUE" : "❌ FALSE"}`
-      );
-      console.log(
-        `   Cleanup In Progress: ${ledgerCleaningRef.current ? "✅ TRUE" : "❌ FALSE"}`
-      );
-      console.log(
-        `   Cleanup Completed: ${ledgerCleanedUpRef.current ? "✅ TRUE" : "❌ FALSE"}`
-      );
-      console.log("");
-
-      // 5. Stored Ledger Info
-      console.log("5️⃣  STORED LEDGER INFO:");
-      if (ledgerDeviceInfo) {
-        console.log(`   Device Name: ${ledgerDeviceInfo.name || "N/A"}`);
-        console.log(`   Device ID: ${ledgerDeviceInfo.id || "N/A"}`);
-      } else {
-        console.log("   ℹ️  No stored device info");
-      }
-      if (ledgerDeviceId) {
-        console.log(`   Stored Device ID: ${ledgerDeviceId}`);
-      } else {
-        console.log("   ℹ️  No stored device ID");
-      }
-      console.log(`   Connection Type: ${ledgerConnectionType || "N/A"}`);
-      console.log(`   Discovered Accounts: ${ledgerAccounts.length}`);
-      console.log("");
-
-      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      console.log("✅ STATUS REPORT COMPLETE");
-      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      console.log("");
-
-      Toast.show({
-        type: "success",
-        text1: "BLE Status Report",
-        text2: `Adapter: ${state} | Devices: ${(await manager.connectedDevices([])).length}`,
-        position: "bottom",
-      });
-    } catch (error) {
-      console.error("❌ Error generating BLE status report:", error);
-      console.error("  Error message:", error.message);
-      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-      Toast.show({
-        type: "error",
-        text1: "Status Check Failed",
-        text2: error.message || "Could not generate BLE status report",
-        position: "bottom",
-      });
-    }
   };
 
   // Proper BLE cleanup function following best practices
@@ -3685,60 +3404,18 @@ function AppContent() {
             });
           }
         },
-        error: async (error) => {
+        error: (error) => {
           console.error("Ledger scan error:", error);
-          console.error("Error name:", error.name);
-          console.error("Error message:", error.message);
-          console.error("Error stack:", error.stack);
-
           setLedgerScanning(false);
           ledgerScanSubscriptionRef.current = null;
-
-          // Check if this is the "Operation was cancelled" error
-          if (
-            error.message &&
-            error.message.includes("Operation was cancelled")
-          ) {
-            console.log(
-              "⚠️ BLE scan cancelled - performing complete BLE cleanup..."
-            );
-
-            // Perform complete BLE cleanup
-            try {
-              // Close any existing transport
-              if (ledgerTransportRef.current) {
-                await ledgerTransportRef.current.close();
-                ledgerTransportRef.current = null;
-                console.log("✓ Transport closed during scan error cleanup");
-              }
-
-              // Clear all BLE-related refs
-              ledgerScanSubscriptionRef.current = null;
-              ledgerCleaningRef.current = false;
-              ledgerCleanedUpRef.current = false;
-
-              console.log("✓ Complete BLE cleanup finished");
-
-              Toast.show({
-                type: "info",
-                text1: "Scan Cancelled",
-                text2: "BLE scan was cancelled. Please try again.",
-                position: "bottom",
-              });
-            } catch (cleanupError) {
-              console.error("Error during BLE cleanup:", cleanupError);
-            }
-          } else {
-            // Other errors - show generic error message
-            Toast.show({
-              type: "error",
-              text1: "Scan Error",
-              text2:
-                error.message ||
-                "Failed to scan for Ledger devices. Check Bluetooth and Solana app.",
-              position: "bottom",
-            });
-          }
+          Toast.show({
+            type: "error",
+            text1: "Scan Error",
+            text2:
+              error.message ||
+              "Failed to scan for Ledger devices. Check Bluetooth and Solana app.",
+            position: "bottom",
+          });
         },
       });
 
@@ -3822,73 +3499,26 @@ function AppContent() {
         isDeviceDescriptor ? "device descriptor" : "device ID"
       );
 
-      // Perform comprehensive BLE cleanup before attempting new connection
+      // Disconnect any existing connection to this device before attempting new connection
       try {
-        console.log(
-          "⚠️ Performing comprehensive BLE cleanup before connection..."
-        );
-
-        // 1. Close any existing transport
-        if (ledgerTransportRef.current) {
-          try {
-            await ledgerTransportRef.current.close();
-            console.log("  ✓ Closed existing transport");
-          } catch (e) {
-            console.log("  ⚠ Error closing transport:", e.message);
-          }
-          ledgerTransportRef.current = null;
-        }
-
-        // 2. Unsubscribe from any existing scans
-        if (ledgerScanSubscriptionRef.current) {
-          try {
-            ledgerScanSubscriptionRef.current.unsubscribe();
-            console.log("  ✓ Cleared scan subscription");
-          } catch (e) {
-            console.log("  ⚠ Error clearing scan subscription:", e.message);
-          }
-          ledgerScanSubscriptionRef.current = null;
-        }
-
-        // 3. Reset cleanup flags
-        ledgerCleaningRef.current = false;
-        ledgerCleanedUpRef.current = false;
-
-        // 4. Power cycle Bluetooth on second retry to clear stale connections
-        //    (Skip on first attempt to avoid unnecessary delay)
-        if (retryCount === 1) {
-          console.log("  🔄 Second retry attempt - power cycling Bluetooth...");
-          const cycled = await powerCycleBluetooth();
-          if (cycled) {
-            console.log("  ✓ Bluetooth power cycle succeeded");
-          } else {
-            console.log(
-              "  ⚠ Bluetooth power cycle not available (Android 13+)"
-            );
-          }
-        }
-
-        // 5. Attempt to disconnect using device ID if supported
-        if (TransportBLE.disconnectDevice) {
-          await TransportBLE.disconnectDevice(deviceId);
-          console.log("  ✓ TransportBLE.disconnectDevice succeeded");
-        } else if (TransportBLE.disconnect) {
+        console.log("Disconnecting any existing connection to device...");
+        // Attempt to disconnect using the device ID if supported
+        if (TransportBLE.disconnect) {
           await TransportBLE.disconnect(deviceId);
-          console.log("  ✓ TransportBLE.disconnect succeeded");
+          console.log("Previous connection disconnected");
         } else {
-          console.log("  ⚠ TransportBLE disconnect methods not supported");
+          console.log(
+            "TransportBLE.disconnect not supported in this version, skipping"
+          );
         }
-
-        // Wait for BLE stack to settle after comprehensive cleanup
-        console.log("  ⏳ Waiting for BLE stack to settle...");
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        console.log("✅ BLE cleanup complete, proceeding with connection");
-      } catch (cleanupError) {
+        // Wait for BLE stack to settle after disconnect
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      } catch (disconnectError) {
         console.log(
-          "⚠️ Error during BLE cleanup (continuing anyway):",
-          cleanupError.message
+          "No active connection to disconnect (or error disconnecting):",
+          disconnectError.message
         );
-        // Brief wait even if cleanup failed
+        // Brief wait even if disconnect failed
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
@@ -3922,211 +3552,41 @@ function AppContent() {
       console.log("Creating Solana app instance...");
       const solana = new AppSolana(transport);
 
-      // Helper function to check balance on both chains
-      const checkAccountBalance = async (address) => {
-        try {
-          // Check Solana mainnet balance
-          const solanaConnection = new Connection(
-            "https://api.mainnet-beta.solana.com",
-            "confirmed"
-          );
-          const solanaPubkey = new PublicKey(address);
-          const solanaBalance = await solanaConnection.getBalance(solanaPubkey);
-          const solanaBalanceSOL = solanaBalance / 1000000000;
+      // Get first 5 accounts
+      const accounts = [];
+      for (let i = 0; i < 5; i++) {
+        const derivationPath = `44'/501'/${i}'/0'`;
+        console.log(`Getting address for path: ${derivationPath}`);
+        const result = await solana.getAddress(derivationPath);
+        const addressBuffer = result.address || result;
 
-          // Check X1 mainnet balance
-          const x1Connection = new Connection(
-            "https://rpc.mainnet.x1.xyz",
-            "confirmed"
-          );
-          const x1Pubkey = new PublicKey(address);
-          const x1Balance = await x1Connection.getBalance(x1Pubkey);
-          const x1BalanceSOL = x1Balance / 1000000000;
-
-          console.log(`[Ledger Scan] Account ${address}:`);
-          console.log(
-            `  SOL: ${solanaBalanceSOL.toFixed(6)} | XNT: ${x1BalanceSOL.toFixed(6)}`
-          );
-
-          return {
-            solana: solanaBalanceSOL,
-            x1: x1BalanceSOL,
-            hasBalance: solanaBalanceSOL > 0 || x1BalanceSOL > 0,
-          };
-        } catch (error) {
-          console.error(
-            `Error checking balance for ${address}:`,
-            error.message
-          );
-          return { solana: 0, x1: 0, hasBalance: false };
+        // Convert Buffer/Uint8Array to Base58 string
+        let addressString;
+        if (typeof addressBuffer === "string") {
+          addressString = addressBuffer;
+        } else if (
+          addressBuffer instanceof Buffer ||
+          addressBuffer instanceof Uint8Array
+        ) {
+          addressString = bs58.encode(addressBuffer);
+        } else {
+          addressString = bs58.encode(Buffer.from(addressBuffer));
         }
-      };
 
-      // Derivation path patterns
-      const DERIVATION_PATTERNS = {
-        standard: (i) => `44'/501'/${i}'/0'`, // Standard Solana (default)
-        ledgerLive: (i) => `44'/501'/${i}'`, // Ledger Live
-        alternate: (i) => `44'/501'/0'/${i}'`, // Alternate (account last)
-      };
+        console.log(`Address ${i}: ${addressString}`);
 
-      // Scan all 30 accounts across all selected derivation patterns
-      const MAX_ACCOUNTS = 30;
-      const allAccounts = [];
-      const accountsWithBalance = [];
-      const seenAddresses = new Set(); // Track unique addresses to avoid duplicates
+        const newAccount = {
+          index: i,
+          address: addressString,
+          derivationPath,
+        };
 
-      console.log(
-        `[Ledger Scan] Starting scan with ${ledgerDerivationPatterns.length} derivation pattern(s): ${ledgerDerivationPatterns.join(", ")}`
-      );
+        accounts.push(newAccount);
 
-      let totalScanned = 0;
-      const totalToScan = MAX_ACCOUNTS * ledgerDerivationPatterns.length;
-
-      // Scan each selected pattern
-      for (const patternKey of ledgerDerivationPatterns) {
-        const pathGenerator = DERIVATION_PATTERNS[patternKey];
-        console.log(`\n[Ledger Scan] === Scanning ${patternKey} pattern ===`);
-
-        let consecutiveEmptyAccounts = 0;
-        const EARLY_STOP_THRESHOLD = 5;
-
-        for (let i = 0; i < MAX_ACCOUNTS; i++) {
-          totalScanned++;
-          const derivationPath = pathGenerator(i);
-          console.log(
-            `\n[Ledger Scan] [${totalScanned}/${totalToScan}] Checking ${patternKey} account ${i + 1}/${MAX_ACCOUNTS}...`
-          );
-          console.log(`  Derivation path: ${derivationPath}`);
-
-          const result = await solana.getAddress(derivationPath);
-          const addressBuffer = result.address || result;
-
-          // Convert Buffer/Uint8Array to Base58 string
-          let addressString;
-          if (typeof addressBuffer === "string") {
-            addressString = addressBuffer;
-          } else if (
-            addressBuffer instanceof Buffer ||
-            addressBuffer instanceof Uint8Array
-          ) {
-            addressString = bs58.encode(addressBuffer);
-          } else {
-            addressString = bs58.encode(Buffer.from(addressBuffer));
-          }
-
-          console.log(`  Address: ${addressString}`);
-
-          // Skip if we've already seen this address from another pattern
-          if (seenAddresses.has(addressString)) {
-            console.log(
-              `  ⊘ Address already scanned from different pattern - skipping`
-            );
-            setLedgerWalletProgress(totalScanned);
-            continue;
-          }
-          seenAddresses.add(addressString);
-
-          // Check balance on both chains
-          const balanceInfo = await checkAccountBalance(addressString);
-
-          const newAccount = {
-            index: i,
-            address: addressString,
-            derivationPath,
-            pattern: patternKey,
-            solanaBalance: balanceInfo.solana,
-            x1Balance: balanceInfo.x1,
-          };
-
-          allAccounts.push(newAccount);
-
-          if (balanceInfo.hasBalance) {
-            // Assign sequential display index for accounts with balance
-            newAccount.displayIndex = accountsWithBalance.length;
-            accountsWithBalance.push(newAccount);
-            console.log(
-              `  ✓ Account HAS balance - added to list as Account ${accountsWithBalance.length}`
-            );
-            consecutiveEmptyAccounts = 0; // Reset counter when we find an account with balance
-          } else {
-            console.log(`  ✗ Account has no balance`);
-            consecutiveEmptyAccounts++;
-            console.log(
-              `  Consecutive empty accounts: ${consecutiveEmptyAccounts}/${EARLY_STOP_THRESHOLD}`
-            );
-          }
-
-          // Update state with all accounts that have balances
-          setLedgerAccounts([...accountsWithBalance]);
-          setLedgerWalletProgress(totalScanned);
-
-          // Early stop if we've seen 5 consecutive accounts with zero balance
-          if (consecutiveEmptyAccounts >= EARLY_STOP_THRESHOLD) {
-            console.log(
-              `\n[Ledger Scan] Stopping ${patternKey} pattern after ${EARLY_STOP_THRESHOLD} consecutive empty accounts`
-            );
-            break;
-          }
-        }
+        // Update state immediately as each wallet is discovered
+        setLedgerAccounts([...accounts]);
+        setLedgerWalletProgress(i + 1);
       }
-
-      console.log(`\n[Ledger Scan] Scan complete!`);
-      console.log(`  Total unique accounts scanned: ${allAccounts.length}`);
-      console.log(`  Accounts with balance: ${accountsWithBalance.length}`);
-      console.log(`  Patterns scanned: ${ledgerDerivationPatterns.join(", ")}`);
-
-      // Print summary table
-      console.log(`\n[Ledger Scan] ========== BALANCE SUMMARY ==========`);
-      console.log(
-        `[Ledger Scan] Pattern    | Path# | Display# | Path             | SOL Balance | XNT Balance | PublicKey`
-      );
-      console.log(
-        `[Ledger Scan] ------------+-------+----------+------------------+-------------+-------------+--------------------------------------------`
-      );
-
-      for (const account of allAccounts) {
-        const pattern = (account.pattern || "standard").padEnd(11, " ");
-        const pathIdx = String(account.index + 1).padStart(5, " ");
-        const displayIdx =
-          account.displayIndex !== undefined
-            ? String(account.displayIndex + 1).padStart(8, " ")
-            : "        ";
-        const path = account.derivationPath.padEnd(16, " ");
-        const solBal = (account.solanaBalance || 0)
-          .toFixed(6)
-          .padStart(11, " ");
-        const xntBal = (account.x1Balance || 0).toFixed(6).padStart(11, " ");
-        const hasBalance =
-          account.solanaBalance > 0 || account.x1Balance > 0 ? "✓" : " ";
-
-        console.log(
-          `[Ledger Scan] ${pattern} | ${pathIdx} | ${displayIdx} | ${path} | ${solBal} | ${xntBal} | ${account.address} ${hasBalance}`
-        );
-      }
-
-      console.log(
-        `[Ledger Scan] ==============================================================================`
-      );
-      console.log(
-        `[Ledger Scan] ✓ = Account has balance and will be shown to user`
-      );
-      console.log(
-        `[Ledger Scan] Path# = Index in derivation path | Display# = Sequential number shown in UI (1, 2, 3...)`
-      );
-      console.log(
-        `[Ledger Scan] Using RPC: SOL=https://api.mainnet-beta.solana.com | X1=https://rpc.mainnet.x1.xyz`
-      );
-
-      if (accountsWithBalance.length === 0) {
-        console.log(
-          `\n[Ledger Scan] ⚠️ No accounts with balance found, showing first 5 accounts`
-        );
-        // If no accounts with balance, show first 5 anyway
-        setLedgerAccounts(accounts.slice(0, 5));
-      }
-
-      // Reset progress to stop the scanning indicator
-      setLedgerWalletProgress(0);
 
       // DON'T close transport immediately! Keep it alive.
       // This prevents the BLE crash from happening during the RxJava cleanup phase.
@@ -4156,42 +3616,20 @@ function AppContent() {
       if (isCancelledError && retryCount < MAX_RETRIES) {
         // Calculate exponential backoff delay: 1s, 2s, 4s
         const delayMs = 1000 * Math.pow(2, retryCount);
-        console.log(
-          `⚠️ Connection cancelled, performing complete cleanup before retry in ${delayMs}ms...`
-        );
+        console.log(`Connection cancelled, retrying in ${delayMs}ms...`);
 
-        // Perform comprehensive BLE cleanup before retry
-        try {
-          // 1. Close transport if it exists
-          if (transport) {
-            try {
-              await transport.close();
-              console.log("  ✓ Closed transport");
-            } catch (e) {
-              console.log("  ⚠ Error closing transport:", e.message);
-            }
+        // Clean up transport if it exists
+        if (transport) {
+          try {
+            await transport.close();
+            ledgerTransportRef.current = null;
+          } catch (closeError) {
+            console.log(
+              "Error closing transport (ignoring):",
+              closeError.message
+            );
+            ledgerTransportRef.current = null;
           }
-          ledgerTransportRef.current = null;
-
-          // 2. Clear scan subscription
-          if (ledgerScanSubscriptionRef.current) {
-            try {
-              ledgerScanSubscriptionRef.current.unsubscribe();
-              console.log("  ✓ Cleared scan subscription");
-            } catch (e) {
-              console.log("  ⚠ Error clearing subscription:", e.message);
-            }
-            ledgerScanSubscriptionRef.current = null;
-          }
-
-          // 3. Reset cleanup flags
-          ledgerCleaningRef.current = false;
-          ledgerCleanedUpRef.current = false;
-
-          console.log("✅ Complete cleanup done before retry");
-        } catch (cleanupError) {
-          console.log("⚠️ Error during cleanup:", cleanupError.message);
-          ledgerTransportRef.current = null;
         }
 
         // Wait for exponential backoff delay
@@ -4204,42 +3642,20 @@ function AppContent() {
       // If we've exhausted retries or it's a different error, handle it
       setLedgerConnecting(false);
 
-      // Perform comprehensive BLE cleanup after exhausting retries
-      console.log("⚠️ Performing comprehensive BLE cleanup after error...");
-      try {
-        // 1. Close transport if it exists
-        if (transport) {
-          try {
-            await transport.close();
-            console.log("  ✓ Transport closed");
-          } catch (e) {
-            console.log("  ⚠ Error closing transport:", e.message);
-          }
+      // Try to clean up transport if it was created
+      if (transport) {
+        try {
+          await transport.close();
+          ledgerTransportRef.current = null;
+          console.log("Transport cleaned up after error");
+        } catch (closeError) {
+          console.log(
+            "Error closing transport after error (ignoring):",
+            closeError.message
+          );
+          // Store in ref for cleanup attempt next time
+          ledgerTransportRef.current = transport;
         }
-        ledgerTransportRef.current = null;
-
-        // 2. Clear scan subscription
-        if (ledgerScanSubscriptionRef.current) {
-          try {
-            ledgerScanSubscriptionRef.current.unsubscribe();
-            console.log("  ✓ Scan subscription cleared");
-          } catch (e) {
-            console.log("  ⚠ Error clearing subscription:", e.message);
-          }
-          ledgerScanSubscriptionRef.current = null;
-        }
-
-        // 3. Reset cleanup flags
-        ledgerCleaningRef.current = false;
-        ledgerCleanedUpRef.current = false;
-
-        console.log("✅ Comprehensive cleanup complete after error");
-      } catch (finalCleanupError) {
-        console.log(
-          "⚠️ Error during final cleanup:",
-          finalCleanupError.message
-        );
-        ledgerTransportRef.current = null;
       }
 
       let errorMessage = "Failed to connect to Ledger device. ";
@@ -4263,6 +3679,12 @@ function AppContent() {
       ) {
         errorMessage +=
           "Communication error (Invalid Tag). Please update your Ledger firmware and Solana app, or try a different cable/connection.";
+      } else if (error.message && error.message.includes("BleError")) {
+        // BLE error detected - show error toast using setLedgerError to display on top of sheets
+        setLedgerError(
+          "Bluetooth Error: Please open Settings and toggle Bluetooth OFF then ON."
+        );
+        return; // Return early without additional error message
       } else if (error.message) {
         errorMessage += error.message;
       } else {
@@ -4424,7 +3846,7 @@ function AppContent() {
 
     const newWallet = {
       id: Date.now(),
-      name: `Ledger ${account.displayIndex + 1}`,
+      name: `Ledger ${account.index + 1}`,
       address: account.address,
       publicKey: account.address,
       selected: true, // Set new wallet as selected
@@ -4457,84 +3879,6 @@ function AppContent() {
 
     // Clean up BLE connection after account is selected
     // Run in background to not block UI
-    cleanupLedgerBLE().catch((e) =>
-      console.log("Cleanup error (ignoring):", e.message)
-    );
-  };
-
-  const handleAddAllLedgerAccounts = async () => {
-    console.log("=== ADDING ALL LEDGER WALLETS ===");
-    console.log("Number of accounts to add:", ledgerAccounts.length);
-
-    const newWallets = [];
-    const skippedAccounts = [];
-
-    for (const account of ledgerAccounts) {
-      // Check for duplicate wallet
-      const isDuplicate = wallets.some((w) => w.publicKey === account.address);
-
-      if (isDuplicate) {
-        console.log(`Skipping duplicate account: ${account.address}`);
-        skippedAccounts.push(account);
-        continue;
-      }
-
-      const newWallet = {
-        id: Date.now() + account.displayIndex, // Unique ID for each wallet
-        name: `Ledger ${account.displayIndex + 1}`,
-        address: account.address,
-        publicKey: account.address,
-        selected: false, // Will select the first one after loop
-        isLedger: true,
-        derivationPath: account.derivationPath,
-        ledgerDeviceId: ledgerDeviceId,
-        hideZeroBalanceTokens: false,
-      };
-
-      newWallets.push(newWallet);
-      console.log(
-        `Added account ${account.displayIndex + 1}: ${account.address}`
-      );
-
-      // Register each wallet with the transaction indexer
-      await registerWalletWithIndexer(
-        account.address,
-        currentNetwork.providerId
-      );
-    }
-
-    if (newWallets.length === 0) {
-      setLedgerError("All accounts have already been added.");
-      return;
-    }
-
-    // Set the first new wallet as selected
-    if (newWallets.length > 0) {
-      newWallets[0].selected = true;
-    }
-
-    // Deselect all existing wallets and add all new wallets
-    const updatedWallets = [
-      ...wallets.map((w) => ({ ...w, selected: false })),
-      ...newWallets,
-    ];
-
-    setWallets(updatedWallets);
-    await saveWalletsToStorage(updatedWallets);
-
-    // Set the first new wallet as the selected wallet
-    setSelectedWallet(newWallets[0]);
-
-    console.log(`Successfully added ${newWallets.length} wallet(s)`);
-    if (skippedAccounts.length > 0) {
-      console.log(`Skipped ${skippedAccounts.length} duplicate(s)`);
-    }
-    console.log("=== END ADDING ALL LEDGER WALLETS ===");
-
-    ledgerSheetRef.current?.dismiss();
-    setLedgerAccounts([]);
-
-    // Clean up BLE connection after accounts are added
     cleanupLedgerBLE().catch((e) =>
       console.log("Cleanup error (ignoring):", e.message)
     );
@@ -4858,1194 +4202,1181 @@ function AppContent() {
     );
   }
 
-  // Check if we should show empty state when no wallets exist (but not when modals are open)
-  const showWelcomeScreen =
+  // Show empty state when no wallets exist (but not when modals are open)
+  if (
     authState === "unlocked" &&
     walletsLoaded &&
     wallets.length === 0 &&
     !showCreateWalletModal &&
     !showAddWalletModal &&
-    !showImportWalletModal;
+    !showImportWalletModal
+  ) {
+    return (
+      <SafeAreaView style={styles.emptyStateContainer}>
+        <StatusBar hidden={true} />
+        <Image
+          source={require("./assets/bg.png")}
+          style={styles.emptyStateBackground}
+          resizeMode="cover"
+        />
+        {/* Dark blue to transparent gradient overlay */}
+        <LinearGradient
+          colors={["#1a1a2e", "transparent"]}
+          style={styles.emptyStateGradientOverlay}
+        />
+        <View
+          style={[styles.emptyStateContent, { paddingTop: insets.top + 20 }]}
+        >
+          {/* Logo with blur background */}
+          <View style={styles.emptyStateLogoContainer}>
+            <Image
+              source={require("./assets/x1-logo-with-blur.png")}
+              style={styles.emptyStateLogoBlur}
+              resizeMode="contain"
+            />
+            <Image
+              source={require("./assets/x1-wallet.png")}
+              style={styles.emptyStateLogo}
+              resizeMode="contain"
+            />
+          </View>
+
+          {/* Title */}
+          <Text style={styles.emptyStateTitle}>X1 Wallet</Text>
+
+          {/* Buttons */}
+          <View
+            style={[
+              styles.emptyStateButtons,
+              { paddingBottom: insets.bottom + 20 },
+            ]}
+          >
+            <TouchableOpacity
+              style={styles.emptyStateCreateButton}
+              onPress={async () => {
+                triggerHaptic();
+                await handleCreateNewWallet();
+              }}
+            >
+              <Text style={styles.emptyStateCreateButtonText}>
+                Create Wallet
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.emptyStateImportButton}
+              onPress={() => {
+                triggerHaptic();
+                setShowAddWalletModal(true);
+              }}
+            >
+              <Text style={styles.emptyStateImportButtonText}>
+                Import Wallet
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <>
-      {showWelcomeScreen ? (
-        <SafeAreaView style={styles.emptyStateContainer}>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaView
+          style={[
+            styles.container,
+            { backgroundColor: easterEggMode ? "#111827" : "#000" },
+          ]}
+        >
           <StatusBar hidden={true} />
-          <Image
-            source={require("./assets/bg.png")}
-            style={styles.emptyStateBackground}
-            resizeMode="cover"
-          />
-          {/* Dark blue to transparent gradient overlay */}
-          <LinearGradient
-            colors={["#1a1a2e", "transparent"]}
-            style={styles.emptyStateGradientOverlay}
+          {/* Top Header with Safe Area */}
+          <View
+            style={[
+              styles.safeTopArea,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
           />
           <View
-            style={[styles.emptyStateContent, { paddingTop: insets.top + 20 }]}
-          >
-            {/* Logo with blur background */}
-            <View style={styles.emptyStateLogoContainer}>
-              <Image
-                source={require("./assets/x1-logo-with-blur.png")}
-                style={styles.emptyStateLogoBlur}
-                resizeMode="contain"
-              />
-              <Image
-                source={require("./assets/x1-wallet.png")}
-                style={styles.emptyStateLogo}
-                resizeMode="contain"
-              />
-            </View>
-
-            {/* Title */}
-            <Text style={styles.emptyStateTitle}>X1 Wallet</Text>
-
-            {/* Buttons */}
-            <View
-              style={[
-                styles.emptyStateButtons,
-                { paddingBottom: insets.bottom + 20 },
-              ]}
-            >
-              <TouchableOpacity
-                style={styles.emptyStateCreateButton}
-                onPress={async () => {
-                  triggerHaptic();
-                  await handleCreateNewWallet();
-                }}
-              >
-                <Text style={styles.emptyStateCreateButtonText}>
-                  Create Wallet
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.emptyStateImportButton}
-                onPress={() => {
-                  triggerHaptic();
-                  setShowAddWalletModal(true);
-                }}
-              >
-                <Text style={styles.emptyStateImportButtonText}>
-                  Import Wallet
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </SafeAreaView>
-      ) : (
-        <GestureHandlerRootView style={{ flex: 1 }}>
-          <SafeAreaView
             style={[
-              styles.container,
+              styles.topBar,
               { backgroundColor: easterEggMode ? "#111827" : "#000" },
             ]}
           >
-            <StatusBar hidden={true} />
-            {/* Top Header with Safe Area */}
-            <View
-              style={[
-                styles.safeTopArea,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            />
-            <View
-              style={[
-                styles.topBar,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              {/* Wallet selector on the left */}
-              <View style={styles.walletSelectorLeft}>
-                <TouchableOpacity
-                  testID="wallet-selector-button"
-                  style={styles.walletDropdownButton}
-                  onPress={() => {
-                    triggerHaptic();
-                    showWalletSelector();
-                  }}
+            {/* Wallet selector on the left */}
+            <View style={styles.walletSelectorLeft}>
+              <TouchableOpacity
+                testID="wallet-selector-button"
+                style={styles.walletDropdownButton}
+                onPress={() => {
+                  triggerHaptic();
+                  showWalletSelector();
+                }}
+              >
+                <Image
+                  source={currentNetwork.logo}
+                  style={styles.x1LogoSmall}
+                />
+                <Text
+                  style={styles.walletDropdownText}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
                 >
-                  <Image
-                    source={currentNetwork.logo}
-                    style={styles.x1LogoSmall}
-                  />
-                  <Text
-                    style={styles.walletDropdownText}
-                    numberOfLines={1}
-                    ellipsizeMode="tail"
-                  >
-                    {selectedWallet?.name
-                      ? selectedWallet.name.length > 10
-                        ? `${selectedWallet.name.slice(0, 10)}...`
-                        : selectedWallet.name
-                      : wallets.length > 0
-                        ? wallets[0].name.length > 10
-                          ? `${wallets[0].name.slice(0, 10)}...`
-                          : wallets[0].name
-                        : "No wallet"}
-                  </Text>
-                  <Text style={styles.walletDropdownArrow}>▼</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Network switch in the middle */}
-              <View style={styles.quickSwitchContainer}>
-                <TouchableOpacity
-                  testID="x1-network-button"
-                  style={[
-                    styles.quickSwitchButton,
-                    (currentNetwork.id === "X1" ||
-                      currentNetwork.id === "X1_TESTNET") &&
-                      styles.quickSwitchButtonActiveX1,
-                  ]}
-                  onPress={handleX1NetworkPress}
-                >
-                  <Image
-                    source={require("./assets/x1.png")}
-                    style={styles.quickSwitchIconX1}
-                  />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  testID="solana-network-button"
-                  style={[
-                    styles.quickSwitchButton,
-                    currentNetwork.id === "SOLANA" &&
-                      styles.quickSwitchButtonActive,
-                  ]}
-                  onPress={() => {
-                    triggerHaptic();
-                    switchNetwork(NETWORKS.find((n) => n.id === "SOLANA"));
-                  }}
-                >
-                  <Image
-                    source={require("./assets/solana.png")}
-                    style={styles.quickSwitchIcon}
-                  />
-                </TouchableOpacity>
-              </View>
-
-              {/* Activity and Settings icons on the right */}
-              <View style={styles.topBarRightIcons}>
-                {/* Offline indicator */}
-                {!isOnline && (
-                  <TouchableOpacity
-                    style={styles.offlineIndicator}
-                    onPress={() => {
-                      if (Platform.OS === "android") {
-                        Linking.sendIntent("android.settings.WIFI_SETTINGS");
-                      } else {
-                        Linking.openURL("app-settings:");
-                      }
-                    }}
-                  >
-                    <Text style={styles.offlineIcon}>📡</Text>
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity
-                  style={styles.activityIcon}
-                  onPress={() => {
-                    triggerHaptic();
-                    checkTransactions();
-                    activitySheetRef.current?.present();
-                  }}
-                >
-                  <Image
-                    source={require("./assets/clock.png")}
-                    style={styles.activityIconImage}
-                  />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.settingsIcon}
-                  onPress={() => {
-                    triggerHaptic();
-                    console.log("Settings button pressed!");
-                    console.log(
-                      "Current showSettingsModal:",
-                      showSettingsModal
-                    );
-                    console.log(
-                      "Current settingsNavigationStack:",
-                      settingsNavigationStack
-                    );
-                    setSettingsNavigationStack([]); // Reset navigation stack
-                    setShowSettingsModal(true);
-                    console.log("After setting showSettingsModal to true");
-                  }}
-                >
-                  <Image
-                    source={require("./assets/settings.png")}
-                    style={styles.settingsIconImage}
-                  />
-                </TouchableOpacity>
-              </View>
+                  {selectedWallet?.name
+                    ? selectedWallet.name.length > 10
+                      ? `${selectedWallet.name.slice(0, 10)}...`
+                      : selectedWallet.name
+                    : wallets.length > 0
+                      ? wallets[0].name.length > 10
+                        ? `${wallets[0].name.slice(0, 10)}...`
+                        : wallets[0].name
+                      : "No wallet"}
+                </Text>
+                <Text style={styles.walletDropdownArrow}>▼</Text>
+              </TouchableOpacity>
             </View>
 
-            {/* Main Scrollable Content */}
-            <ScrollView
-              style={[
-                styles.mainContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-              contentContainerStyle={styles.mainContentContainer}
-              showsVerticalScrollIndicator={false}
-              refreshControl={
-                <RefreshControl
-                  refreshing={refreshing}
-                  onRefresh={onRefresh}
-                  tintColor="#4A90E2"
-                  colors={["#4A90E2"]}
-                />
-              }
-            >
-              {/* Balance Section with all content */}
-              <View
+            {/* Network switch in the middle */}
+            <View style={styles.quickSwitchContainer}>
+              <TouchableOpacity
+                testID="x1-network-button"
                 style={[
-                  styles.balanceSection,
-                  { backgroundColor: easterEggMode ? "#111827" : "#000" },
+                  styles.quickSwitchButton,
+                  (currentNetwork.id === "X1" ||
+                    currentNetwork.id === "X1_TESTNET") &&
+                    styles.quickSwitchButtonActiveX1,
                 ]}
+                onPress={handleX1NetworkPress}
               >
-                {/* Balance display - shown for all chains */}
-                {currentNetwork && (
-                  <TouchableOpacity
-                    style={styles.balanceContent}
-                    onPress={handleBalanceTap}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.balanceUSD}>{balanceUSD}</Text>
-                    <Text
-                      style={[
-                        styles.balanceChange,
-                        {
-                          color:
-                            portfolioGainLoss.valueChange > 0
-                              ? "#00D084"
-                              : portfolioGainLoss.valueChange < 0
-                                ? "#FF6B6B"
-                                : "#999999",
-                        },
-                      ]}
-                    >
-                      {portfolioGainLoss.valueChange !== 0
-                        ? `${portfolioGainLoss.valueChange > 0 ? "+" : ""}$${Math.abs(
-                            portfolioGainLoss.valueChange
-                          ).toLocaleString("en-US", {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })} (${portfolioGainLoss.percentChange > 0 ? "+" : ""}${portfolioGainLoss.percentChange.toFixed(
-                            2
-                          )}%)`
-                        : "$0.00 (0.00%)"}
-                    </Text>
-                  </TouchableOpacity>
-                )}
+                <Image
+                  source={require("./assets/x1.png")}
+                  style={styles.quickSwitchIconX1}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="solana-network-button"
+                style={[
+                  styles.quickSwitchButton,
+                  currentNetwork.id === "SOLANA" &&
+                    styles.quickSwitchButtonActive,
+                ]}
+                onPress={() => {
+                  triggerHaptic();
+                  switchNetwork(NETWORKS.find((n) => n.id === "SOLANA"));
+                }}
+              >
+                <Image
+                  source={require("./assets/solana.png")}
+                  style={styles.quickSwitchIcon}
+                />
+              </TouchableOpacity>
+            </View>
 
-                {/* Action Buttons */}
-                <View style={styles.actionsRow}>
-                  <TouchableOpacity
-                    style={styles.actionCircle}
-                    onPress={() => {
-                      if (hapticMode) {
-                        triggerHaptic();
-                        animateButtonPress(receiveScale);
-                      }
-                      handleReceive();
-                    }}
-                  >
-                    <Animated.View
-                      style={[
-                        styles.actionCircleBg,
-                        hapticMode && styles.actionCircleBgEnhanced,
-                        { backgroundColor: hapticMode ? "#4A90E2" : "#1a1a1a" },
-                        hapticMode && { transform: [{ scale: receiveScale }] },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.actionCircleIcon,
-                          !hapticMode && { color: "#4A90E2" },
-                        ]}
-                      >
-                        ▼
-                      </Text>
-                    </Animated.View>
-                    <Text style={styles.actionCircleText}>Receive</Text>
-                  </TouchableOpacity>
+            {/* Activity and Settings icons on the right */}
+            <View style={styles.topBarRightIcons}>
+              {/* Offline indicator */}
+              {!isOnline && (
+                <TouchableOpacity
+                  style={styles.offlineIndicator}
+                  onPress={() => {
+                    if (Platform.OS === "android") {
+                      Linking.sendIntent("android.settings.WIFI_SETTINGS");
+                    } else {
+                      Linking.openURL("app-settings:");
+                    }
+                  }}
+                >
+                  <Text style={styles.offlineIcon}>📡</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.activityIcon}
+                onPress={() => {
+                  triggerHaptic();
+                  checkTransactions();
+                  activitySheetRef.current?.present();
+                }}
+              >
+                <Image
+                  source={require("./assets/clock.png")}
+                  style={styles.activityIconImage}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.settingsIcon}
+                onPress={() => {
+                  triggerHaptic();
+                  console.log("Settings button pressed!");
+                  console.log("Current showSettingsModal:", showSettingsModal);
+                  console.log(
+                    "Current settingsNavigationStack:",
+                    settingsNavigationStack
+                  );
+                  setSettingsNavigationStack([]); // Reset navigation stack
+                  setShowSettingsModal(true);
+                  console.log("After setting showSettingsModal to true");
+                }}
+              >
+                <Image
+                  source={require("./assets/settings.png")}
+                  style={styles.settingsIconImage}
+                />
+              </TouchableOpacity>
+            </View>
+          </View>
 
-                  <TouchableOpacity
-                    style={styles.actionCircle}
-                    onPress={() => {
-                      if (hapticMode) {
-                        triggerHaptic();
-                        animateButtonPress(sendScale);
-                      }
-                      handleSend();
-                    }}
-                  >
-                    <Animated.View
-                      style={[
-                        styles.actionCircleBg,
-                        hapticMode && styles.actionCircleBgEnhanced,
-                        { backgroundColor: hapticMode ? "#E8A951" : "#1a1a1a" },
-                        hapticMode && { transform: [{ scale: sendScale }] },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.actionCircleIcon,
-                          !hapticMode && { color: "#4A90E2" },
-                        ]}
-                      >
-                        ▲
-                      </Text>
-                    </Animated.View>
-                    <Text style={styles.actionCircleText}>Send</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.actionCircle}
-                    onPress={() => {
-                      if (hapticMode) {
-                        triggerHaptic();
-                        animateButtonPress(swapScale);
-                      }
-                      handleSwap();
-                    }}
-                  >
-                    <Animated.View
-                      style={[
-                        styles.actionCircleBg,
-                        hapticMode && styles.actionCircleBgEnhanced,
-                        { backgroundColor: hapticMode ? "#9B59B6" : "#1a1a1a" },
-                        hapticMode && { transform: [{ scale: swapScale }] },
-                      ]}
-                    >
-                      <Image
-                        source={require("./assets/swap.png")}
-                        style={[
-                          styles.swapIcon,
-                          !hapticMode && { tintColor: "#4A90E2" },
-                        ]}
-                      />
-                    </Animated.View>
-                    <Text style={styles.actionCircleText}>Swap</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.actionCircle}
-                    onPress={() => {
-                      if (hapticMode) {
-                        triggerHaptic();
-                        animateButtonPress(stakeScale);
-                      }
-                      handleStake();
-                    }}
-                  >
-                    <Animated.View
-                      style={[
-                        styles.actionCircleBg,
-                        hapticMode && styles.actionCircleBgEnhanced,
-                        { backgroundColor: hapticMode ? "#2ECC71" : "#1a1a1a" },
-                        hapticMode && { transform: [{ scale: stakeScale }] },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.actionCircleIcon,
-                          !hapticMode && { color: "#4A90E2" },
-                        ]}
-                      >
-                        ◈
-                      </Text>
-                    </Animated.View>
-                    <Text style={styles.actionCircleText}>Stake</Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Token List - Use GraphQL for Solana, REST for others */}
-                {selectedWallet &&
-                currentNetwork &&
-                currentNetwork.providerId.startsWith("SOLANA") ? (
-                  <View style={styles.tokenSection}>
-                    <TokenBalances
-                      address={selectedWallet.publicKey}
-                      providerId={currentNetwork.providerId}
-                      pollingIntervalSeconds={60}
-                      enableColorfulIcons={easterEggMode}
-                      hideZeroBalanceTokens={
-                        selectedWallet.hideZeroBalanceTokens || false
-                      }
-                      onBalanceUpdate={handleBalanceUpdate}
-                      onItemClick={handleTokenClick}
-                    />
-                  </View>
-                ) : (
-                  <View style={styles.tokenSection}>
-                    {tokens.map((token) => {
-                      return (
-                        <View
-                          key={token.id}
-                          style={[
-                            styles.tokenRow,
-                            hapticMode && styles.tokenRowEnhanced,
-                          ]}
-                        >
-                          <View style={styles.tokenLeft}>
-                            <TokenIcon
-                              symbol={token.symbol || token.name}
-                              logo={token.logo}
-                              logoUrl={token.logoUrl}
-                              size={50}
-                              imageStyle={styles.x1LogoLarge}
-                            />
-                            <View style={styles.tokenInfo}>
-                              <Text style={styles.tokenNameLarge}>
-                                {token.name}
-                              </Text>
-                              <Text style={styles.tokenBalanceSmall}>
-                                {token.balance} {token.symbol || token.name}
-                              </Text>
-                            </View>
-                          </View>
-                          <View style={styles.tokenRight}>
-                            <Text style={styles.tokenUsdLarge}>
-                              ${token.usdValue}
-                            </Text>
-                            <Text style={styles.tokenChange}>+$0.00</Text>
-                          </View>
-                        </View>
-                      );
-                    })}
-                  </View>
-                )}
-              </View>
-            </ScrollView>
-
-            {/* Bottom Tab Bar */}
+          {/* Main Scrollable Content */}
+          <ScrollView
+            style={[
+              styles.mainContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+            contentContainerStyle={styles.mainContentContainer}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor="#4A90E2"
+                colors={["#4A90E2"]}
+              />
+            }
+          >
+            {/* Balance Section with all content */}
             <View
               style={[
-                styles.bottomTabBar,
-                { paddingBottom: Math.max(insets.bottom, 8) },
+                styles.balanceSection,
+                { backgroundColor: easterEggMode ? "#111827" : "#000" },
               ]}
             >
-              <TouchableOpacity
-                style={styles.bottomTabItem}
-                onPress={() => {
-                  setCurrentBottomTab("portfolio");
-                  setShowTestBrowser(false);
-                }}
-              >
-                <Image
-                  source={require("./assets/pie-chart-icon.png")}
-                  style={[
-                    styles.bottomTabIconImage,
-                    currentBottomTab === "portfolio" &&
-                      styles.bottomTabIconImageActive,
-                  ]}
-                  resizeMode="contain"
-                />
-                <Text
-                  style={[
-                    styles.bottomTabText,
-                    currentBottomTab === "portfolio" &&
-                      styles.bottomTabTextActive,
-                  ]}
+              {/* Balance display - shown for all chains */}
+              {currentNetwork && (
+                <TouchableOpacity
+                  style={styles.balanceContent}
+                  onPress={handleBalanceTap}
+                  activeOpacity={0.7}
                 >
-                  Portfolio
-                </Text>
-              </TouchableOpacity>
+                  <Text style={styles.balanceUSD}>{balanceUSD}</Text>
+                  <Text
+                    style={[
+                      styles.balanceChange,
+                      {
+                        color:
+                          portfolioGainLoss.valueChange > 0
+                            ? "#00D084"
+                            : portfolioGainLoss.valueChange < 0
+                              ? "#FF6B6B"
+                              : "#999999",
+                      },
+                    ]}
+                  >
+                    {portfolioGainLoss.valueChange !== 0
+                      ? `${portfolioGainLoss.valueChange > 0 ? "+" : ""}$${Math.abs(
+                          portfolioGainLoss.valueChange
+                        ).toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })} (${portfolioGainLoss.percentChange > 0 ? "+" : ""}${portfolioGainLoss.percentChange.toFixed(
+                          2
+                        )}%)`
+                      : "$0.00 (0.00%)"}
+                  </Text>
+                </TouchableOpacity>
+              )}
 
-              <TouchableOpacity
-                style={styles.bottomTabItem}
-                onPress={() => {
-                  setCurrentBottomTab("swap");
-                  handleSwap();
-                }}
-              >
-                <Image
-                  source={require("./assets/swap.png")}
-                  style={[
-                    styles.bottomTabIconImage,
-                    currentBottomTab === "swap" &&
-                      styles.bottomTabIconImageActive,
-                  ]}
-                  resizeMode="contain"
-                />
-                <Text
-                  style={[
-                    styles.bottomTabText,
-                    currentBottomTab === "swap" && styles.bottomTabTextActive,
-                  ]}
+              {/* Action Buttons */}
+              <View style={styles.actionsRow}>
+                <TouchableOpacity
+                  style={styles.actionCircle}
+                  onPress={() => {
+                    if (hapticMode) {
+                      triggerHaptic();
+                      animateButtonPress(receiveScale);
+                    }
+                    handleReceive();
+                  }}
                 >
-                  Swap
-                </Text>
-              </TouchableOpacity>
+                  <Animated.View
+                    style={[
+                      styles.actionCircleBg,
+                      hapticMode && styles.actionCircleBgEnhanced,
+                      { backgroundColor: hapticMode ? "#4A90E2" : "#1a1a1a" },
+                      hapticMode && { transform: [{ scale: receiveScale }] },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.actionCircleIcon,
+                        !hapticMode && { color: "#4A90E2" },
+                      ]}
+                    >
+                      ▼
+                    </Text>
+                  </Animated.View>
+                  <Text style={styles.actionCircleText}>Receive</Text>
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.bottomTabItem}
-                onPress={() => {
-                  setCurrentBottomTab("browser");
-                  setShowTestBrowser(true);
-                }}
-              >
-                <Image
-                  source={require("./assets/browser.png")}
-                  style={styles.bottomTabIconImage}
-                  resizeMode="contain"
-                />
-                <Text
-                  style={[
-                    styles.bottomTabText,
-                    currentBottomTab === "browser" &&
-                      styles.bottomTabTextActive,
-                  ]}
+                <TouchableOpacity
+                  style={styles.actionCircle}
+                  onPress={() => {
+                    if (hapticMode) {
+                      triggerHaptic();
+                      animateButtonPress(sendScale);
+                    }
+                    handleSend();
+                  }}
                 >
-                  Browser
+                  <Animated.View
+                    style={[
+                      styles.actionCircleBg,
+                      hapticMode && styles.actionCircleBgEnhanced,
+                      { backgroundColor: hapticMode ? "#E8A951" : "#1a1a1a" },
+                      hapticMode && { transform: [{ scale: sendScale }] },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.actionCircleIcon,
+                        !hapticMode && { color: "#4A90E2" },
+                      ]}
+                    >
+                      ▲
+                    </Text>
+                  </Animated.View>
+                  <Text style={styles.actionCircleText}>Send</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.actionCircle}
+                  onPress={() => {
+                    if (hapticMode) {
+                      triggerHaptic();
+                      animateButtonPress(swapScale);
+                    }
+                    handleSwap();
+                  }}
+                >
+                  <Animated.View
+                    style={[
+                      styles.actionCircleBg,
+                      hapticMode && styles.actionCircleBgEnhanced,
+                      { backgroundColor: hapticMode ? "#9B59B6" : "#1a1a1a" },
+                      hapticMode && { transform: [{ scale: swapScale }] },
+                    ]}
+                  >
+                    <Image
+                      source={require("./assets/swap.png")}
+                      style={[
+                        styles.swapIcon,
+                        !hapticMode && { tintColor: "#4A90E2" },
+                      ]}
+                    />
+                  </Animated.View>
+                  <Text style={styles.actionCircleText}>Swap</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.actionCircle}
+                  onPress={() => {
+                    if (hapticMode) {
+                      triggerHaptic();
+                      animateButtonPress(stakeScale);
+                    }
+                    handleStake();
+                  }}
+                >
+                  <Animated.View
+                    style={[
+                      styles.actionCircleBg,
+                      hapticMode && styles.actionCircleBgEnhanced,
+                      { backgroundColor: hapticMode ? "#2ECC71" : "#1a1a1a" },
+                      hapticMode && { transform: [{ scale: stakeScale }] },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.actionCircleIcon,
+                        !hapticMode && { color: "#4A90E2" },
+                      ]}
+                    >
+                      ◈
+                    </Text>
+                  </Animated.View>
+                  <Text style={styles.actionCircleText}>Stake</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Token List - Use GraphQL for Solana, REST for others */}
+              {selectedWallet &&
+              currentNetwork &&
+              currentNetwork.providerId.startsWith("SOLANA") ? (
+                <View style={styles.tokenSection}>
+                  <TokenBalances
+                    address={selectedWallet.publicKey}
+                    providerId={currentNetwork.providerId}
+                    pollingIntervalSeconds={60}
+                    enableColorfulIcons={easterEggMode}
+                    hideZeroBalanceTokens={
+                      selectedWallet.hideZeroBalanceTokens || false
+                    }
+                    onBalanceUpdate={handleBalanceUpdate}
+                    onItemClick={handleTokenClick}
+                  />
+                </View>
+              ) : (
+                <View style={styles.tokenSection}>
+                  {tokens.map((token) => {
+                    return (
+                      <View
+                        key={token.id}
+                        style={[
+                          styles.tokenRow,
+                          hapticMode && styles.tokenRowEnhanced,
+                        ]}
+                      >
+                        <View style={styles.tokenLeft}>
+                          <TokenIcon
+                            symbol={token.symbol || token.name}
+                            logo={token.logo}
+                            logoUrl={token.logoUrl}
+                            size={50}
+                            imageStyle={styles.x1LogoLarge}
+                          />
+                          <View style={styles.tokenInfo}>
+                            <Text style={styles.tokenNameLarge}>
+                              {token.name}
+                            </Text>
+                            <Text style={styles.tokenBalanceSmall}>
+                              {token.balance} {token.symbol || token.name}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.tokenRight}>
+                          <Text style={styles.tokenUsdLarge}>
+                            ${token.usdValue}
+                          </Text>
+                          <Text style={styles.tokenChange}>+$0.00</Text>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+            </View>
+          </ScrollView>
+
+          {/* Bottom Tab Bar */}
+          <View
+            style={[
+              styles.bottomTabBar,
+              { paddingBottom: Math.max(insets.bottom, 8) },
+            ]}
+          >
+            <TouchableOpacity
+              style={styles.bottomTabItem}
+              onPress={() => {
+                setCurrentBottomTab("portfolio");
+                setShowTestBrowser(false);
+              }}
+            >
+              <Image
+                source={require("./assets/pie-chart-icon.png")}
+                style={[
+                  styles.bottomTabIconImage,
+                  currentBottomTab === "portfolio" &&
+                    styles.bottomTabIconImageActive,
+                ]}
+                resizeMode="contain"
+              />
+              <Text
+                style={[
+                  styles.bottomTabText,
+                  currentBottomTab === "portfolio" &&
+                    styles.bottomTabTextActive,
+                ]}
+              >
+                Portfolio
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.bottomTabItem}
+              onPress={() => {
+                setCurrentBottomTab("swap");
+                handleSwap();
+              }}
+            >
+              <Image
+                source={require("./assets/swap.png")}
+                style={[
+                  styles.bottomTabIconImage,
+                  currentBottomTab === "swap" &&
+                    styles.bottomTabIconImageActive,
+                ]}
+                resizeMode="contain"
+              />
+              <Text
+                style={[
+                  styles.bottomTabText,
+                  currentBottomTab === "swap" && styles.bottomTabTextActive,
+                ]}
+              >
+                Swap
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.bottomTabItem}
+              onPress={() => {
+                setCurrentBottomTab("browser");
+                setShowTestBrowser(true);
+              }}
+            >
+              <Image
+                source={require("./assets/browser.png")}
+                style={styles.bottomTabIconImage}
+                resizeMode="contain"
+              />
+              <Text
+                style={[
+                  styles.bottomTabText,
+                  currentBottomTab === "browser" && styles.bottomTabTextActive,
+                ]}
+              >
+                Browser
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+
+        {/* Network Selector Side Drawer */}
+        <SimpleActionSheet
+          ref={networkSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <TouchableOpacity
+                onPress={() => networkSheetRef.current?.dismiss()}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+              <Text style={styles.bottomSheetTitle}>Select Network</Text>
+              <View style={{ width: 24 }} />
+            </View>
+
+            {/* Network List */}
+            <ScrollView style={styles.networkList}>
+              {NETWORKS.map((network) => (
+                <TouchableOpacity
+                  key={network.id}
+                  style={[
+                    styles.networkItem,
+                    currentNetwork.id === network.id &&
+                      styles.networkItemSelected,
+                  ]}
+                  onPress={() => switchNetwork(network)}
+                >
+                  <Image source={network.logo} style={styles.networkItemIcon} />
+                  <Text style={styles.networkItemText}>{network.name}</Text>
+                  {currentNetwork.id === network.id && (
+                    <Text style={styles.networkItemCheck}>✓</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </SimpleActionSheet>
+
+        {/* Bluetooth Devices Drawer */}
+        {showBluetoothDrawer && (
+          <Modal
+            visible={showBluetoothDrawer}
+            transparent={true}
+            animationType="slide"
+            onRequestClose={() => setShowBluetoothDrawer(false)}
+          >
+            <Pressable
+              style={styles.networkDrawerOverlay}
+              onPress={() => setShowBluetoothDrawer(false)}
+            >
+              <Pressable
+                style={styles.networkDrawerContent}
+                onPress={(e) => e.stopPropagation()}
+              >
+                <View style={styles.networkDrawerContentArea}>
+                  {/* Header */}
+                  <View style={styles.networkDrawerHeader}>
+                    <Text style={styles.networkDrawerTitle}>
+                      Bluetooth Devices
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() => setShowBluetoothDrawer(false)}
+                    >
+                      <Text style={styles.networkDrawerClose}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Device List */}
+                  <ScrollView style={styles.networkList}>
+                    {pairedDevices.length === 0 ? (
+                      <View style={styles.emptyBluetoothList}>
+                        <Text style={styles.emptyBluetoothText}>
+                          No paired Bluetooth devices found
+                        </Text>
+                        <Text style={styles.emptyBluetoothSubtext}>
+                          Connect to a Ledger device to see it here
+                        </Text>
+                      </View>
+                    ) : (
+                      pairedDevices.map((device) => (
+                        <View
+                          key={device.id}
+                          style={styles.bluetoothDeviceItem}
+                        >
+                          <View style={styles.bluetoothDeviceInfo}>
+                            <Text style={styles.bluetoothDeviceName}>
+                              {device.name}
+                            </Text>
+                            <Text style={styles.bluetoothDeviceAddress}>
+                              {device.address}
+                            </Text>
+                            {device.isConnected && (
+                              <Text style={styles.bluetoothDeviceConnected}>
+                                Connected
+                              </Text>
+                            )}
+                          </View>
+                          <View style={styles.bluetoothDeviceButtons}>
+                            <TouchableOpacity
+                              style={styles.bluetoothDeviceDeleteButton}
+                              onPress={() => forgetBluetoothDevice(device.id)}
+                            >
+                              <Text style={styles.bluetoothDeviceDeleteText}>
+                                Forget
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ))
+                    )}
+                  </ScrollView>
+
+                  {/* Scan Button */}
+                  <TouchableOpacity
+                    style={styles.bluetoothRefreshButton}
+                    onPress={async () => {
+                      setShowBluetoothDrawer(false);
+                      ledgerSheetRef.current?.present();
+                      await scanForLedger();
+                    }}
+                  >
+                    <Text style={styles.bluetoothRefreshButtonText}>Scan</Text>
+                  </TouchableOpacity>
+                </View>
+              </Pressable>
+            </Pressable>
+          </Modal>
+        )}
+
+        {/* Wallet Selector Bottom Sheet */}
+        <SimpleActionSheet
+          ref={bottomSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <ScrollView
+            testID="wallet-list-sheet"
+            contentContainerStyle={[
+              styles.bottomSheetScrollContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <TouchableOpacity
+                onPress={() => bottomSheetRef.current?.dismiss()}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+              <View style={styles.bottomSheetTitleContainer}>
+                <Text style={styles.bottomSheetTitle}>Wallets</Text>
+                <Text style={styles.bottomSheetNetworkBadge}>
+                  {currentNetwork.name}
                 </Text>
+              </View>
+              <TouchableOpacity onPress={handleAddWallet}>
+                <Text style={styles.bottomSheetAdd}>+</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Wallets List */}
+            <View style={styles.bottomSheetList}>
+              {wallets.map((wallet, index) => (
+                <TouchableOpacity
+                  key={wallet.id}
+                  testID={`wallet-item-${wallet.id}`}
+                  style={[
+                    styles.bottomSheetWalletItem,
+                    wallet.selected && styles.bottomSheetWalletItemSelected,
+                  ]}
+                  onPress={() => selectWallet(wallet)}
+                >
+                  <View style={styles.bottomSheetWalletLeft}>
+                    <Image
+                      source={currentNetwork.logo}
+                      style={styles.x1LogoLarge}
+                    />
+                    <View style={styles.bottomSheetWalletInfo}>
+                      <Text style={styles.bottomSheetWalletName}>
+                        {wallet.name}
+                      </Text>
+                      <Text style={styles.bottomSheetWalletAddress}>
+                        {copiedWalletId === wallet.id ? (
+                          "Copied"
+                        ) : (
+                          <>
+                            {wallet.publicKey.slice(0, 12)}
+                            <Text style={{ fontSize: 14.4 }}>...</Text>
+                            {wallet.publicKey.slice(-12)}
+                          </>
+                        )}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.bottomSheetWalletRight}>
+                    <TouchableOpacity
+                      testID={
+                        index === 0
+                          ? "first-wallet-copy-button"
+                          : `wallet-copy-button-${wallet.id}`
+                      }
+                      style={styles.bottomSheetCopyBtn}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        Clipboard.setString(wallet.publicKey);
+                        setCopiedWalletId(wallet.id);
+                        setTimeout(() => {
+                          setCopiedWalletId(null);
+                        }, 3000);
+                      }}
+                    >
+                      <Text style={styles.bottomSheetCopyIcon}>⧉</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      testID={
+                        index === 0
+                          ? "first-wallet-menu-button"
+                          : `wallet-menu-button-${wallet.id}`
+                      }
+                      style={styles.bottomSheetEditBtn}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        setEditingWallet(wallet);
+                        setEditWalletName(wallet.name);
+                        editWalletSheetRef.current?.present();
+                      }}
+                    >
+                      <Text style={styles.bottomSheetEditIcon}>⋮</Text>
+                    </TouchableOpacity>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
+        </SimpleActionSheet>
+
+        {/* Account Selector Side Drawer */}
+        <SimpleActionSheet
+          ref={accountSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <TouchableOpacity
+                onPress={() => accountSheetRef.current?.dismiss()}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+              <Text style={styles.bottomSheetTitle}>Select Account</Text>
+              <View style={{ width: 24 }} />
+            </View>
+
+            {/* Account List */}
+            <ScrollView style={styles.accountList}>
+              {accounts.map((account) => (
+                <TouchableOpacity
+                  key={account.id}
+                  style={[
+                    styles.accountItem,
+                    account.selected && styles.accountItemSelected,
+                  ]}
+                  onPress={() => selectAccount(account)}
+                >
+                  <View
+                    style={[
+                      styles.accountBadge,
+                      { backgroundColor: account.badgeColor },
+                    ]}
+                  >
+                    <Text style={styles.accountBadgeText}>{account.badge}</Text>
+                  </View>
+                  <Text style={styles.accountItemText}>{account.name}</Text>
+                  {account.selected && (
+                    <Text style={styles.accountItemCheck}>✓</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Add New Account Button */}
+            <TouchableOpacity style={styles.addAccountButton}>
+              <Text style={styles.addAccountButtonText}>+ New Account</Text>
+            </TouchableOpacity>
+          </View>
+        </SimpleActionSheet>
+
+        {/* Debug Console - Full Page */}
+        <Modal
+          visible={showDebugDrawer}
+          transparent={false}
+          animationType="slide"
+          onRequestClose={() => setShowDebugDrawer(false)}
+        >
+          <SafeAreaView style={styles.debugFullPageContainer}>
+            {/* Header */}
+            <View style={styles.debugFullPageHeader}>
+              <Text style={styles.debugFullPageTitle}>Debug Console</Text>
+              <TouchableOpacity onPress={() => setShowDebugDrawer(false)}>
+                <Text style={styles.debugFullPageClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Debug Logs */}
+            <ScrollView
+              style={styles.debugLogList}
+              showsVerticalScrollIndicator={true}
+            >
+              {debugLogs.length === 0 ? (
+                <Text style={styles.debugNoLogs}>No logs yet...</Text>
+              ) : (
+                debugLogs.map((log, index) => (
+                  <Text key={index} style={styles.debugLogText}>
+                    {log}
+                  </Text>
+                ))
+              )}
+            </ScrollView>
+
+            {/* Clear Button */}
+            <View style={styles.debugFullPageFooter}>
+              <TouchableOpacity
+                style={styles.debugClearButton}
+                onPress={() => setDebugLogs([])}
+              >
+                <Text style={styles.debugClearButtonText}>Clear Logs</Text>
               </TouchableOpacity>
             </View>
           </SafeAreaView>
+        </Modal>
 
-          {/* Network Selector Side Drawer */}
-          <SimpleActionSheet
-            ref={networkSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
+        {/* Receive Drawer */}
+        <SimpleActionSheet
+          ref={receiveSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
           >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <TouchableOpacity
-                  onPress={() => networkSheetRef.current?.dismiss()}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-                <Text style={styles.bottomSheetTitle}>Select Network</Text>
-                <View style={{ width: 24 }} />
-              </View>
-
-              {/* Network List */}
-              <ScrollView style={styles.networkList}>
-                {NETWORKS.map((network) => (
-                  <TouchableOpacity
-                    key={network.id}
-                    style={[
-                      styles.networkItem,
-                      currentNetwork.id === network.id &&
-                        styles.networkItemSelected,
-                    ]}
-                    onPress={() => switchNetwork(network)}
-                  >
-                    <Image
-                      source={network.logo}
-                      style={styles.networkItemIcon}
-                    />
-                    <Text style={styles.networkItemText}>{network.name}</Text>
-                    {currentNetwork.id === network.id && (
-                      <Text style={styles.networkItemCheck}>✓</Text>
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-          </SimpleActionSheet>
-
-          {/* Bluetooth Devices Drawer */}
-          {showBluetoothDrawer && (
-            <Modal
-              visible={showBluetoothDrawer}
-              transparent={true}
-              animationType="slide"
-              onRequestClose={() => setShowBluetoothDrawer(false)}
-            >
-              <Pressable
-                style={styles.networkDrawerOverlay}
-                onPress={() => setShowBluetoothDrawer(false)}
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <Text style={styles.bottomSheetTitle}>
+                Receive {getNativeTokenInfo().symbol}
+              </Text>
+              <TouchableOpacity
+                onPress={() => receiveSheetRef.current?.dismiss()}
               >
-                <Pressable
-                  style={styles.networkDrawerContent}
-                  onPress={(e) => e.stopPropagation()}
-                >
-                  <View style={styles.networkDrawerContentArea}>
-                    {/* Header */}
-                    <View style={styles.networkDrawerHeader}>
-                      <Text style={styles.networkDrawerTitle}>
-                        Bluetooth Devices
-                      </Text>
-                      <TouchableOpacity
-                        onPress={() => setShowBluetoothDrawer(false)}
-                      >
-                        <Text style={styles.networkDrawerClose}>✕</Text>
-                      </TouchableOpacity>
-                    </View>
-
-                    {/* Device List */}
-                    <ScrollView style={styles.networkList}>
-                      {pairedDevices.length === 0 ? (
-                        <View style={styles.emptyBluetoothList}>
-                          <Text style={styles.emptyBluetoothText}>
-                            No paired Bluetooth devices found
-                          </Text>
-                          <Text style={styles.emptyBluetoothSubtext}>
-                            Connect to a Ledger device to see it here
-                          </Text>
-                        </View>
-                      ) : (
-                        pairedDevices.map((device) => (
-                          <View
-                            key={device.id}
-                            style={styles.bluetoothDeviceItem}
-                          >
-                            <View style={styles.bluetoothDeviceInfo}>
-                              <Text style={styles.bluetoothDeviceName}>
-                                {device.name}
-                              </Text>
-                              <Text style={styles.bluetoothDeviceAddress}>
-                                {device.address}
-                              </Text>
-                              {device.isConnected && (
-                                <Text style={styles.bluetoothDeviceConnected}>
-                                  Connected
-                                </Text>
-                              )}
-                            </View>
-                            <View style={styles.bluetoothDeviceButtons}>
-                              <TouchableOpacity
-                                style={styles.bluetoothDeviceDeleteButton}
-                                onPress={() => forgetBluetoothDevice(device.id)}
-                              >
-                                <Text style={styles.bluetoothDeviceDeleteText}>
-                                  Forget
-                                </Text>
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        ))
-                      )}
-                    </ScrollView>
-
-                    {/* Scan Button */}
-                    <TouchableOpacity
-                      style={styles.bluetoothRefreshButton}
-                      onPress={async () => {
-                        setShowBluetoothDrawer(false);
-                        ledgerSheetRef.current?.present();
-                        await scanForLedger();
-                      }}
-                    >
-                      <Text style={styles.bluetoothRefreshButtonText}>
-                        Scan
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </Pressable>
-              </Pressable>
-            </Modal>
-          )}
-
-          {/* Wallet Selector Bottom Sheet */}
-          <SimpleActionSheet
-            ref={bottomSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <ScrollView
-              testID="wallet-list-sheet"
-              contentContainerStyle={[
-                styles.bottomSheetScrollContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-              showsVerticalScrollIndicator={false}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <TouchableOpacity
-                  onPress={() => bottomSheetRef.current?.dismiss()}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-                <View style={styles.bottomSheetTitleContainer}>
-                  <Text style={styles.bottomSheetTitle}>Wallets</Text>
-                  <Text style={styles.bottomSheetNetworkBadge}>
-                    {currentNetwork.name}
-                  </Text>
-                </View>
-                <TouchableOpacity onPress={handleAddWallet}>
-                  <Text style={styles.bottomSheetAdd}>+</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Wallets List */}
-              <View style={styles.bottomSheetList}>
-                {wallets.map((wallet, index) => (
-                  <TouchableOpacity
-                    key={wallet.id}
-                    testID={`wallet-item-${wallet.id}`}
-                    style={[
-                      styles.bottomSheetWalletItem,
-                      wallet.selected && styles.bottomSheetWalletItemSelected,
-                    ]}
-                    onPress={() => selectWallet(wallet)}
-                  >
-                    <View style={styles.bottomSheetWalletLeft}>
-                      <Image
-                        source={currentNetwork.logo}
-                        style={styles.x1LogoLarge}
-                      />
-                      <View style={styles.bottomSheetWalletInfo}>
-                        <Text style={styles.bottomSheetWalletName}>
-                          {wallet.name}
-                        </Text>
-                        <Text style={styles.bottomSheetWalletAddress}>
-                          {copiedWalletId === wallet.id ? (
-                            "Copied"
-                          ) : (
-                            <>
-                              {wallet.publicKey.slice(0, 12)}
-                              <Text style={{ fontSize: 14.4 }}>...</Text>
-                              {wallet.publicKey.slice(-12)}
-                            </>
-                          )}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.bottomSheetWalletRight}>
-                      <TouchableOpacity
-                        testID={
-                          index === 0
-                            ? "first-wallet-copy-button"
-                            : `wallet-copy-button-${wallet.id}`
-                        }
-                        style={styles.bottomSheetCopyBtn}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          Clipboard.setString(wallet.publicKey);
-                          setCopiedWalletId(wallet.id);
-                          setTimeout(() => {
-                            setCopiedWalletId(null);
-                          }, 3000);
-                        }}
-                      >
-                        <Text style={styles.bottomSheetCopyIcon}>⧉</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        testID={
-                          index === 0
-                            ? "first-wallet-menu-button"
-                            : `wallet-menu-button-${wallet.id}`
-                        }
-                        style={styles.bottomSheetEditBtn}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          setEditingWallet(wallet);
-                          setEditWalletName(wallet.name);
-                          editWalletSheetRef.current?.present();
-                        }}
-                      >
-                        <Text style={styles.bottomSheetEditIcon}>⋮</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </ScrollView>
-          </SimpleActionSheet>
-
-          {/* Account Selector Side Drawer */}
-          <SimpleActionSheet
-            ref={accountSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <TouchableOpacity
-                  onPress={() => accountSheetRef.current?.dismiss()}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-                <Text style={styles.bottomSheetTitle}>Select Account</Text>
-                <View style={{ width: 24 }} />
-              </View>
-
-              {/* Account List */}
-              <ScrollView style={styles.accountList}>
-                {accounts.map((account) => (
-                  <TouchableOpacity
-                    key={account.id}
-                    style={[
-                      styles.accountItem,
-                      account.selected && styles.accountItemSelected,
-                    ]}
-                    onPress={() => selectAccount(account)}
-                  >
-                    <View
-                      style={[
-                        styles.accountBadge,
-                        { backgroundColor: account.badgeColor },
-                      ]}
-                    >
-                      <Text style={styles.accountBadgeText}>
-                        {account.badge}
-                      </Text>
-                    </View>
-                    <Text style={styles.accountItemText}>{account.name}</Text>
-                    {account.selected && (
-                      <Text style={styles.accountItemCheck}>✓</Text>
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              {/* Add New Account Button */}
-              <TouchableOpacity style={styles.addAccountButton}>
-                <Text style={styles.addAccountButtonText}>+ New Account</Text>
+                <Text style={styles.bottomSheetClose}>✕</Text>
               </TouchableOpacity>
             </View>
-          </SimpleActionSheet>
 
-          {/* Debug Console - Full Page */}
-          <Modal
-            visible={showDebugDrawer}
-            transparent={false}
-            animationType="slide"
-            onRequestClose={() => setShowDebugDrawer(false)}
-          >
-            <SafeAreaView style={styles.debugFullPageContainer}>
-              {/* Header */}
-              <View style={styles.debugFullPageHeader}>
-                <Text style={styles.debugFullPageTitle}>Debug Console</Text>
-                <TouchableOpacity onPress={() => setShowDebugDrawer(false)}>
-                  <Text style={styles.debugFullPageClose}>✕</Text>
-                </TouchableOpacity>
+            {/* QR Code */}
+            <View style={styles.receiveQRContainer}>
+              <View style={styles.receiveQRWrapper}>
+                <QRCode
+                  value={selectedWallet?.publicKey || "No wallet"}
+                  size={200}
+                  backgroundColor="white"
+                  color="black"
+                />
               </View>
+            </View>
 
-              {/* Debug Logs */}
-              <ScrollView
-                style={styles.debugLogList}
-                showsVerticalScrollIndicator={true}
+            {/* Address */}
+            <View style={styles.receiveAddressContainer}>
+              <Text style={styles.receiveAddressLabel}>Your Address</Text>
+              <Text
+                style={styles.receiveAddressText}
+                numberOfLines={1}
+                adjustsFontSizeToFit={true}
               >
-                {debugLogs.length === 0 ? (
-                  <Text style={styles.debugNoLogs}>No logs yet...</Text>
-                ) : (
-                  debugLogs.map((log, index) => (
-                    <Text key={index} style={styles.debugLogText}>
-                      {log}
-                    </Text>
-                  ))
-                )}
-              </ScrollView>
+                {addressCopied
+                  ? "Copied!"
+                  : selectedWallet?.publicKey || "No wallet selected"}
+              </Text>
+            </View>
 
-              {/* Clear Button */}
-              <View style={styles.debugFullPageFooter}>
-                <TouchableOpacity
-                  style={styles.debugClearButton}
-                  onPress={() => setDebugLogs([])}
-                >
-                  <Text style={styles.debugClearButtonText}>Clear Logs</Text>
-                </TouchableOpacity>
-              </View>
-            </SafeAreaView>
-          </Modal>
-
-          {/* Receive Drawer */}
-          <SimpleActionSheet
-            ref={receiveSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
+            {/* Copy Button */}
+            <TouchableOpacity
+              style={styles.receiveCopyButton}
+              onPress={() => {
+                copyToClipboard(selectedWallet.publicKey);
+                setAddressCopied(true);
+                setTimeout(() => {
+                  setAddressCopied(false);
+                }, 4000);
+              }}
             >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
+              <Text style={styles.receiveCopyButtonText}>Copy Address</Text>
+            </TouchableOpacity>
+          </View>
+        </SimpleActionSheet>
+
+        {/* Send Drawer */}
+        <SimpleActionSheet
+          ref={sendSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <TouchableOpacity onPress={() => sendSheetRef.current?.dismiss()}>
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+              <View style={styles.bottomSheetTitleContainer}>
                 <Text style={styles.bottomSheetTitle}>
-                  Receive {getNativeTokenInfo().symbol}
+                  Send {getNativeTokenInfo().symbol}
                 </Text>
+              </View>
+              <TouchableOpacity onPress={handleOpenQRScanner}>
+                <Image
+                  source={require("./assets/scan2.png")}
+                  style={styles.scanIcon}
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* Balance Display */}
+            <View style={styles.sendBalanceContainer}>
+              <Text style={styles.sendBalanceLabel}>Available Balance</Text>
+              <TouchableOpacity onPress={() => setSendAmount(balance)}>
+                <Text style={styles.sendBalanceText}>
+                  {balance} {getNativeTokenInfo().symbol}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Amount Input */}
+            <View style={styles.sendInputContainer}>
+              <Text style={styles.sendInputLabel}>Amount</Text>
+              <TextInput
+                style={styles.sendInput}
+                placeholder="0.00"
+                placeholderTextColor="#666666"
+                value={sendAmount}
+                onChangeText={setSendAmount}
+                keyboardType="decimal-pad"
+              />
+            </View>
+
+            {/* Address Input */}
+            <View style={styles.sendInputContainer}>
+              <View style={styles.sendAddressHeader}>
+                <Text style={styles.sendInputLabel}>Recipient Address</Text>
                 <TouchableOpacity
-                  onPress={() => receiveSheetRef.current?.dismiss()}
+                  onPress={() => addressSheetRef.current?.present()}
                 >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
+                  <Text style={styles.sendSelectAddressText}>
+                    Select Address
+                  </Text>
                 </TouchableOpacity>
               </View>
-
-              {/* QR Code */}
-              <View style={styles.receiveQRContainer}>
-                <View style={styles.receiveQRWrapper}>
-                  <QRCode
-                    value={selectedWallet?.publicKey || "No wallet"}
-                    size={200}
-                    backgroundColor="white"
-                    color="black"
-                  />
-                </View>
-              </View>
-
-              {/* Address */}
-              <View style={styles.receiveAddressContainer}>
-                <Text style={styles.receiveAddressLabel}>Your Address</Text>
-                <Text
-                  style={styles.receiveAddressText}
-                  numberOfLines={1}
-                  adjustsFontSizeToFit={true}
-                >
-                  {addressCopied
-                    ? "Copied!"
-                    : selectedWallet?.publicKey || "No wallet selected"}
-                </Text>
-              </View>
-
-              {/* Copy Button */}
-              <TouchableOpacity
-                style={styles.receiveCopyButton}
-                onPress={() => {
-                  copyToClipboard(selectedWallet.publicKey);
-                  setAddressCopied(true);
-                  setTimeout(() => {
-                    setAddressCopied(false);
-                  }, 4000);
+              <TextInput
+                ref={sendAddressInputRef}
+                style={styles.sendInput}
+                placeholder="Enter address..."
+                placeholderTextColor="#666666"
+                value={sendAddress}
+                onChangeText={(text) => {
+                  setSendAddress(text);
+                  setAddressSelection(null); // Clear selection control when user types
                 }}
-              >
-                <Text style={styles.receiveCopyButtonText}>Copy Address</Text>
-              </TouchableOpacity>
+                selection={addressSelection}
+                autoCapitalize="none"
+                textAlign="left"
+              />
             </View>
-          </SimpleActionSheet>
 
-          {/* Send Drawer */}
-          <SimpleActionSheet
-            ref={sendSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
+            {/* Send Button */}
+            <TouchableOpacity
+              style={styles.sendSubmitButton}
+              onPress={() => handleSendSubmit(sendAmount, sendAddress)}
             >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <TouchableOpacity
-                  onPress={() => sendSheetRef.current?.dismiss()}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-                <View style={styles.bottomSheetTitleContainer}>
-                  <Text style={styles.bottomSheetTitle}>
-                    Send {getNativeTokenInfo().symbol}
-                  </Text>
-                </View>
-                <TouchableOpacity onPress={handleOpenQRScanner}>
-                  <Image
-                    source={require("./assets/scan2.png")}
-                    style={styles.scanIcon}
-                  />
-                </TouchableOpacity>
-              </View>
+              <Text style={styles.sendSubmitButtonText}>Send</Text>
+            </TouchableOpacity>
+          </View>
+        </SimpleActionSheet>
 
-              {/* Balance Display */}
-              <View style={styles.sendBalanceContainer}>
-                <Text style={styles.sendBalanceLabel}>Available Balance</Text>
-                <TouchableOpacity onPress={() => setSendAmount(balance)}>
-                  <Text style={styles.sendBalanceText}>
-                    {balance} {getNativeTokenInfo().symbol}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Amount Input */}
-              <View style={styles.sendInputContainer}>
-                <Text style={styles.sendInputLabel}>Amount</Text>
-                <TextInput
-                  style={styles.sendInput}
-                  placeholder="0.00"
-                  placeholderTextColor="#666666"
-                  value={sendAmount}
-                  onChangeText={setSendAmount}
-                  keyboardType="decimal-pad"
-                />
-              </View>
-
-              {/* Address Input */}
-              <View style={styles.sendInputContainer}>
-                <View style={styles.sendAddressHeader}>
-                  <Text style={styles.sendInputLabel}>Recipient Address</Text>
-                  <TouchableOpacity
-                    onPress={() => addressSheetRef.current?.present()}
-                  >
-                    <Text style={styles.sendSelectAddressText}>
-                      Select Address
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-                <TextInput
-                  ref={sendAddressInputRef}
-                  style={styles.sendInput}
-                  placeholder="Enter address..."
-                  placeholderTextColor="#666666"
-                  value={sendAddress}
-                  onChangeText={(text) => {
-                    setSendAddress(text);
-                    setAddressSelection(null); // Clear selection control when user types
-                  }}
-                  selection={addressSelection}
-                  autoCapitalize="none"
-                  textAlign="left"
-                />
-              </View>
-
-              {/* Send Button */}
+        {/* Address Selector Modal */}
+        <SimpleActionSheet
+          ref={addressSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            {/* Header */}
+            <View style={styles.bottomSheetHeader}>
+              <Text style={styles.bottomSheetTitle}>Select Address</Text>
               <TouchableOpacity
-                style={styles.sendSubmitButton}
-                onPress={() => handleSendSubmit(sendAmount, sendAddress)}
+                onPress={() => addressSheetRef.current?.dismiss()}
               >
-                <Text style={styles.sendSubmitButtonText}>Send</Text>
+                <Text style={styles.bottomSheetClose}>✕</Text>
               </TouchableOpacity>
             </View>
-          </SimpleActionSheet>
 
-          {/* Address Selector Modal */}
-          <SimpleActionSheet
-            ref={addressSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <Text style={styles.bottomSheetTitle}>Select Address</Text>
+            {/* Address List */}
+            <ScrollView style={styles.addressList}>
+              {wallets.map((wallet, index) => (
                 <TouchableOpacity
-                  onPress={() => addressSheetRef.current?.dismiss()}
+                  key={wallet.id}
+                  style={styles.addressItem}
+                  testID={
+                    index === 0
+                      ? "first-address-selector-wallet"
+                      : `address-selector-wallet-${index}`
+                  }
+                  onPress={() => {
+                    setSendAddress(wallet.publicKey);
+                    addressSheetRef.current?.dismiss();
+                  }}
                 >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
+                  <View style={styles.addressItemContent}>
+                    <Text style={styles.addressItemName}>{wallet.name}</Text>
+                    <Text style={styles.addressItemAddress} numberOfLines={1}>
+                      {wallet.address}
+                    </Text>
+                  </View>
                 </TouchableOpacity>
-              </View>
+              ))}
+            </ScrollView>
+          </View>
+        </SimpleActionSheet>
 
-              {/* Address List */}
-              <ScrollView style={styles.addressList}>
-                {wallets.map((wallet, index) => (
-                  <TouchableOpacity
-                    key={wallet.id}
-                    style={styles.addressItem}
-                    testID={
-                      index === 0
-                        ? "first-address-selector-wallet"
-                        : `address-selector-wallet-${index}`
-                    }
-                    onPress={() => {
-                      setSendAddress(wallet.publicKey);
-                      addressSheetRef.current?.dismiss();
-                    }}
-                  >
-                    <View style={styles.addressItemContent}>
-                      <Text style={styles.addressItemName}>{wallet.name}</Text>
-                      <Text style={styles.addressItemAddress} numberOfLines={1}>
-                        {wallet.address}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+        {/* Activity Drawer */}
+        {/* Activity Bottom Sheet */}
+        <SimpleActionSheet
+          ref={activitySheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          {/* Activity List with BottomSheetScrollView */}
+          <ScrollView
+            contentContainerStyle={
+              transactions.length === 0
+                ? styles.emptyStateScrollContent
+                : styles.sheetScrollContent
+            }
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Header */}
+            <View style={styles.activitySheetHeader}>
+              <TouchableOpacity onPress={() => checkTransactions()}>
+                <Text style={styles.sheetHeaderButton}>↻</Text>
+              </TouchableOpacity>
+              <Text style={styles.activitySheetTitle}>Activity</Text>
+              <TouchableOpacity
+                onPress={() => activitySheetRef.current?.dismiss()}
+              >
+                <Text style={styles.sheetHeaderButton}>✕</Text>
+              </TouchableOpacity>
             </View>
-          </SimpleActionSheet>
 
-          {/* Activity Drawer */}
-          {/* Activity Bottom Sheet */}
-          <SimpleActionSheet
-            ref={activitySheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            {/* Activity List with BottomSheetScrollView */}
-            <ScrollView
-              contentContainerStyle={
-                transactions.length === 0
-                  ? styles.emptyStateScrollContent
-                  : styles.sheetScrollContent
-              }
-              showsVerticalScrollIndicator={false}
-            >
-              {/* Header */}
-              <View style={styles.activitySheetHeader}>
-                <TouchableOpacity onPress={() => checkTransactions()}>
-                  <Text style={styles.sheetHeaderButton}>↻</Text>
-                </TouchableOpacity>
-                <Text style={styles.activitySheetTitle}>Activity</Text>
+            {/* Transactions List */}
+            {transactions.length === 0 ? (
+              <>
+                <View style={styles.emptyStateSpacer} />
+                <View style={styles.emptyStateContainer}>
+                  <Text style={styles.emptyStateText}>No transactions yet</Text>
+                  <Text style={styles.emptyStateSubtext}>
+                    Your transaction history will appear here
+                  </Text>
+                </View>
+              </>
+            ) : (
+              transactions.map((tx) => (
                 <TouchableOpacity
-                  onPress={() => activitySheetRef.current?.dismiss()}
+                  key={tx.id}
+                  style={styles.activityCard}
+                  onPress={() => openExplorer(tx.signature)}
                 >
-                  <Text style={styles.sheetHeaderButton}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Transactions List */}
-              {isIndexing ? (
-                <>
-                  <View style={styles.emptyStateSpacer} />
-                  <View style={styles.emptyStateContainer}>
-                    <ActivityIndicator size="large" color="#4A90E2" />
-                    <Text style={[styles.emptyStateText, { marginTop: 20 }]}>
-                      {indexingMessage}
-                    </Text>
-                  </View>
-                </>
-              ) : transactions.length === 0 ? (
-                <>
-                  <View style={styles.emptyStateSpacer} />
-                  <View style={styles.emptyStateContainer}>
-                    <Text style={styles.emptyStateText}>
-                      {indexingMessage || "No transactions yet"}
-                    </Text>
-                    <Text style={styles.emptyStateSubtext}>
-                      Your transaction history will appear here
-                    </Text>
-                  </View>
-                </>
-              ) : (
-                transactions.map((tx) => (
-                  <TouchableOpacity
-                    key={tx.id}
-                    style={styles.activityCard}
-                    onPress={() => openExplorer(tx.signature)}
-                  >
-                    {/* Token logo */}
-                    <Image
-                      source={
-                        tx.token === "XNT"
+                  {/* Token logo */}
+                  <Image
+                    source={
+                      tx.tokenIcon
+                        ? { uri: tx.tokenIcon }
+                        : tx.token === "XNT"
                           ? require("./assets/x1.png")
                           : require("./assets/solana.png")
-                      }
-                      style={styles.activityCardLogo}
-                    />
+                    }
+                    style={styles.activityCardLogo}
+                  />
 
-                    <View style={styles.activityCardContent}>
-                      {/* Header with title and time */}
-                      <View style={styles.activityCardHeader}>
+                  <View style={styles.activityCardContent}>
+                    {/* Header with title and time */}
+                    <View style={styles.activityCardHeader}>
+                      <View style={styles.activityCardTitleContainer}>
                         <Text style={styles.activityCardTitle}>
                           {tx.type === "received" ? "Received" : "Sent"}{" "}
                           {tx.token}
                         </Text>
-                        <Text style={styles.activityCardTime}>
-                          {tx.timestamp}
-                        </Text>
+                        {tx.tokenName && (
+                          <Text style={styles.activityCardSubtitle}>
+                            {tx.tokenName}
+                          </Text>
+                        )}
                       </View>
+                      <Text style={styles.activityCardTime}>
+                        {tx.timestamp}
+                      </Text>
+                    </View>
 
-                      {/* Amount row */}
-                      <View style={styles.activityCardRow}>
-                        <Text style={styles.activityCardLabel}>Amount</Text>
+                    {/* Amount row */}
+                    <View style={styles.activityCardRow}>
+                      <Text style={styles.activityCardLabel}>Amount</Text>
+                      <View style={styles.activityCardValueContainer}>
                         <Text
                           style={[
                             styles.activityCardValue,
@@ -6058,540 +5389,598 @@ function AppContent() {
                           {tx.type === "received" ? "+" : "-"}
                           {tx.amount} {tx.token}
                         </Text>
-                      </View>
-
-                      {/* Fee row */}
-                      <View style={styles.activityCardRow}>
-                        <Text style={styles.activityCardLabel}>Fee</Text>
-                        <Text style={styles.activityCardValue}>
-                          {tx.fee || "0.000001650"} {tx.token}
-                        </Text>
+                        {tx.valueUSD && (
+                          <Text style={styles.activityCardValueUSD}>
+                            ≈ ${tx.valueUSD}
+                          </Text>
+                        )}
                       </View>
                     </View>
-                  </TouchableOpacity>
-                ))
-              )}
-            </ScrollView>
-          </SimpleActionSheet>
 
-          {/* Add Wallet Modal - Choice */}
-          <Modal
-            visible={showAddWalletModal}
-            transparent={true}
-            animationType="slide"
-          >
-            <Pressable
-              style={styles.settingsDrawerOverlay}
-              onPress={() => setShowAddWalletModal(false)}
-            >
-              <Pressable
-                style={[
-                  styles.settingsDrawerContent,
-                  { backgroundColor: easterEggMode ? "#111827" : "#000" },
-                ]}
-                onPress={(e) => e.stopPropagation()}
-              >
-                <View style={styles.settingsDrawerContentArea}>
-                  <View style={styles.settingsDrawerHeader}>
-                    <View style={{ width: 32 }} />
-                    <Text style={styles.settingsDrawerTitle}>Add Wallet</Text>
-                    <TouchableOpacity
-                      onPress={() => setShowAddWalletModal(false)}
-                    >
-                      <Text style={styles.settingsDrawerClose}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.walletOptionButton}
-                    onPress={handleCreateNewWallet}
-                  >
-                    <Text style={styles.walletOptionText}>
-                      Create New Wallet
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.walletOptionButton}
-                    onPress={handleShowImportWallet}
-                  >
-                    <Text style={styles.walletOptionText}>Import Wallet</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.walletOptionButton}
-                    onPress={handleShowLedger}
-                  >
-                    <Text style={styles.walletOptionText}>Connect Ledger</Text>
-                  </TouchableOpacity>
-                </View>
-              </Pressable>
-            </Pressable>
-          </Modal>
-
-          {/* Create Wallet Modal - Display Seed Phrase */}
-          <Modal
-            visible={showCreateWalletModal}
-            transparent={true}
-            animationType="slide"
-          >
-            <Pressable
-              style={styles.settingsDrawerOverlay}
-              onPress={() => {
-                if (!isInitialSetup) {
-                  setShowCreateWalletModal(false);
-                } else {
-                  Toast.show({
-                    type: "error",
-                    text1: "Setup Required",
-                    text2: "Please save your master seed phrase to continue",
-                    position: "bottom",
-                  });
-                }
-              }}
-            >
-              <Pressable
-                style={[
-                  styles.settingsDrawerContent,
-                  { backgroundColor: easterEggMode ? "#111827" : "#000" },
-                ]}
-                onPress={(e) => e.stopPropagation()}
-              >
-                <View style={styles.settingsDrawerContentArea}>
-                  <View style={styles.settingsDrawerHeader}>
-                    <View style={{ width: 32 }} />
-                    <Text style={styles.settingsDrawerTitle}>
-                      Create Wallet
-                    </Text>
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (isInitialSetup) {
-                          // Don't allow closing during initial setup
-                          Toast.show({
-                            type: "error",
-                            text1: "Setup Required",
-                            text2:
-                              "Please save your master seed phrase to continue",
-                            position: "bottom",
-                          });
-                        } else {
-                          setShowCreateWalletModal(false);
-                        }
-                      }}
-                    >
-                      <Text style={styles.settingsDrawerClose}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <Text style={styles.seedPhraseTitle}>
-                    {isInitialSetup
-                      ? "Your Master Seed Phrase"
-                      : "Your Seed Phrase"}
-                  </Text>
-                  <View style={styles.seedPhraseContainer}>
-                    <TouchableOpacity
-                      style={styles.seedPhraseCopyBtnInside}
-                      onPress={copySeedPhrase}
-                    >
-                      <Text
-                        style={[
-                          styles.seedPhraseCopyIconInside,
-                          { fontSize: 20.4 },
-                        ]}
-                      >
-                        ⧉
+                    {/* Fee row */}
+                    <View style={styles.activityCardRow}>
+                      <Text style={styles.activityCardLabel}>Fee</Text>
+                      <Text style={styles.activityCardValue}>
+                        {tx.fee || "0.000001650"} {tx.token}
                       </Text>
-                    </TouchableOpacity>
-                    <View style={styles.seedPhraseGrid}>
-                      {newMnemonic && newMnemonic.trim()
-                        ? newMnemonic.split(" ").map((word, index) => (
-                            <View key={index} style={styles.seedPhraseWord}>
-                              <Text style={styles.seedPhraseText}>
-                                {index + 1}. {word}
-                              </Text>
-                            </View>
-                          ))
-                        : null}
                     </View>
                   </View>
-                  <Text style={styles.seedPhraseWarning}>
-                    {isInitialSetup
-                      ? "This is your master seed phrase. Save it securely in a safe place. You'll need it to recover all your wallets. All future wallets will be derived from this seed phrase."
-                      : "Save this seed phrase securely. You'll need it to recover your wallet."}
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.confirmButton}
-                    onPress={handleConfirmCreateWallet}
-                  >
-                    <Text style={styles.confirmButtonText}>
-                      {isInitialSetup
-                        ? "I've Saved My Master Seed Phrase"
-                        : "I've Saved My Seed Phrase"}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </Pressable>
-            </Pressable>
-          </Modal>
+                </TouchableOpacity>
+              ))
+            )}
+          </ScrollView>
+        </SimpleActionSheet>
 
-          {/* Import Wallet Modal */}
-          <Modal
-            visible={showImportWalletModal}
-            transparent={true}
-            animationType="slide"
+        {/* Add Wallet Modal - Choice */}
+        <Modal
+          visible={showAddWalletModal}
+          transparent={true}
+          animationType="slide"
+        >
+          <Pressable
+            style={styles.settingsDrawerOverlay}
+            onPress={() => setShowAddWalletModal(false)}
           >
             <Pressable
-              style={styles.settingsDrawerOverlay}
-              onPress={() => {
-                setShowImportWalletModal(false);
-                setPhraseWords(Array(12).fill(""));
-                setPhraseDisclaimerAccepted(false);
-                setUse24Words(false);
-              }}
+              style={[
+                styles.settingsDrawerContent,
+                { backgroundColor: easterEggMode ? "#111827" : "#000" },
+              ]}
+              onPress={(e) => e.stopPropagation()}
             >
-              <Pressable
-                style={[
-                  styles.settingsDrawerContent,
-                  { backgroundColor: easterEggMode ? "#111827" : "#000" },
-                ]}
-                onPress={(e) => e.stopPropagation()}
-              >
-                <View style={styles.settingsDrawerContentArea}>
-                  <View style={styles.settingsDrawerHeader}>
-                    <View style={{ width: 32 }} />
-                    <Text style={styles.settingsDrawerTitle}>
-                      Import Wallet
-                    </Text>
-                    <TouchableOpacity
-                      onPress={() => {
-                        setShowImportWalletModal(false);
-                        setImportPrivateKey("");
-                      }}
-                    >
-                      <Text style={styles.settingsDrawerClose}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <TextInput
-                    style={styles.importInput}
-                    placeholder="Enter your private key (bs58 or JSON array)"
-                    placeholderTextColor="#666666"
-                    value={importPrivateKey}
-                    onChangeText={setImportPrivateKey}
-                    multiline
-                    numberOfLines={4}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
+              <View style={styles.settingsDrawerContentArea}>
+                <View style={styles.settingsDrawerHeader}>
+                  <View style={{ width: 32 }} />
+                  <Text style={styles.settingsDrawerTitle}>Add Wallet</Text>
                   <TouchableOpacity
-                    style={styles.confirmButton}
-                    onPress={handleImportWallet}
+                    onPress={() => setShowAddWalletModal(false)}
                   >
-                    <Text style={styles.confirmButtonText}>Import Wallet</Text>
+                    <Text style={styles.settingsDrawerClose}>✕</Text>
                   </TouchableOpacity>
                 </View>
-              </Pressable>
-            </Pressable>
-          </Modal>
-
-          {/* Edit Wallet Modal */}
-          <SimpleActionSheet
-            ref={editWalletSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View testID="edit-wallet-sheet" style={styles.bottomSheetContent}>
-              <View style={styles.bottomSheetHeader}>
-                <View style={{ width: 32 }} />
-                <Text style={styles.bottomSheetTitle}>Edit Wallet</Text>
                 <TouchableOpacity
-                  onPress={() => {
-                    editWalletSheetRef.current?.dismiss();
-                    setEditingWallet(null);
-                  }}
+                  style={styles.walletOptionButton}
+                  onPress={handleCreateNewWallet}
                 >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
+                  <Text style={styles.walletOptionText}>Create New Wallet</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.walletOptionButton}
+                  onPress={handleShowImportWallet}
+                >
+                  <Text style={styles.walletOptionText}>Import Wallet</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.walletOptionButton}
+                  onPress={handleShowLedger}
+                >
+                  <Text style={styles.walletOptionText}>Connect Ledger</Text>
                 </TouchableOpacity>
               </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
-              {/* Menu Items */}
-              <ScrollView style={styles.settingsMenuList}>
+        {/* Create Wallet Modal - Display Seed Phrase */}
+        <Modal
+          visible={showCreateWalletModal}
+          transparent={true}
+          animationType="slide"
+        >
+          <Pressable
+            style={styles.settingsDrawerOverlay}
+            onPress={() => {
+              if (!isInitialSetup) {
+                setShowCreateWalletModal(false);
+              } else {
+                Toast.show({
+                  type: "error",
+                  text1: "Setup Required",
+                  text2: "Please save your master seed phrase to continue",
+                  position: "bottom",
+                });
+              }
+            }}
+          >
+            <Pressable
+              style={[
+                styles.settingsDrawerContent,
+                { backgroundColor: easterEggMode ? "#111827" : "#000" },
+              ]}
+              onPress={(e) => e.stopPropagation()}
+            >
+              <View style={styles.settingsDrawerContentArea}>
+                <View style={styles.settingsDrawerHeader}>
+                  <View style={{ width: 32 }} />
+                  <Text style={styles.settingsDrawerTitle}>Create Wallet</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      if (isInitialSetup) {
+                        // Don't allow closing during initial setup
+                        Toast.show({
+                          type: "error",
+                          text1: "Setup Required",
+                          text2:
+                            "Please save your master seed phrase to continue",
+                          position: "bottom",
+                        });
+                      } else {
+                        setShowCreateWalletModal(false);
+                      }
+                    }}
+                  >
+                    <Text style={styles.settingsDrawerClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.seedPhraseTitle}>
+                  {isInitialSetup
+                    ? "Your Master Seed Phrase"
+                    : "Your Seed Phrase"}
+                </Text>
+                <View style={styles.seedPhraseContainer}>
+                  <TouchableOpacity
+                    style={styles.seedPhraseCopyBtnInside}
+                    onPress={copySeedPhrase}
+                  >
+                    <Text
+                      style={[
+                        styles.seedPhraseCopyIconInside,
+                        { fontSize: 20.4 },
+                      ]}
+                    >
+                      ⧉
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.seedPhraseGrid}>
+                    {newMnemonic && newMnemonic.trim()
+                      ? newMnemonic.split(" ").map((word, index) => (
+                          <View key={index} style={styles.seedPhraseWord}>
+                            <Text style={styles.seedPhraseText}>
+                              {index + 1}. {word}
+                            </Text>
+                          </View>
+                        ))
+                      : null}
+                  </View>
+                </View>
+                <Text style={styles.seedPhraseWarning}>
+                  {isInitialSetup
+                    ? "This is your master seed phrase. Save it securely in a safe place. You'll need it to recover all your wallets. All future wallets will be derived from this seed phrase."
+                    : "Save this seed phrase securely. You'll need it to recover your wallet."}
+                </Text>
                 <TouchableOpacity
-                  testID="change-account-name-button"
-                  style={styles.settingsMenuItem}
-                  onPress={() => {
-                    editWalletSheetRef.current?.dismiss();
-                    setShowChangeNameModal(true);
-                  }}
+                  style={styles.confirmButton}
+                  onPress={handleConfirmCreateWallet}
                 >
-                  <Text style={styles.settingsMenuItemText}>
-                    Change Account Name
+                  <Text style={styles.confirmButtonText}>
+                    {isInitialSetup
+                      ? "I've Saved My Master Seed Phrase"
+                      : "I've Saved My Seed Phrase"}
                   </Text>
-                  <Text style={styles.settingsMenuItemArrow}>›</Text>
                 </TouchableOpacity>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
-                {/* Hide Zero Balance Tokens Toggle */}
-                <View
-                  testID="hide-zero-balance-toggle"
-                  style={styles.settingsMenuItem}
+        {/* Import Wallet Modal */}
+        <Modal
+          visible={showImportWalletModal}
+          transparent={true}
+          animationType="slide"
+        >
+          <Pressable
+            style={styles.settingsDrawerOverlay}
+            onPress={() => {
+              setShowImportWalletModal(false);
+              setPhraseWords(Array(12).fill(""));
+              setPhraseDisclaimerAccepted(false);
+              setUse24Words(false);
+            }}
+          >
+            <Pressable
+              style={[
+                styles.settingsDrawerContent,
+                { backgroundColor: easterEggMode ? "#111827" : "#000" },
+              ]}
+              onPress={(e) => e.stopPropagation()}
+            >
+              <View style={styles.settingsDrawerContentArea}>
+                <View style={styles.settingsDrawerHeader}>
+                  <View style={{ width: 32 }} />
+                  <Text style={styles.settingsDrawerTitle}>Import Wallet</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowImportWalletModal(false);
+                      setImportPrivateKey("");
+                    }}
+                  >
+                    <Text style={styles.settingsDrawerClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TextInput
+                  style={styles.importInput}
+                  placeholder="Enter your private key (bs58 or JSON array)"
+                  placeholderTextColor="#666666"
+                  value={importPrivateKey}
+                  onChangeText={setImportPrivateKey}
+                  multiline
+                  numberOfLines={4}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TouchableOpacity
+                  style={styles.confirmButton}
+                  onPress={handleImportWallet}
                 >
-                  <Text style={styles.settingsMenuItemText}>
-                    Hide Zero Balance Tokens
-                  </Text>
-                  <Switch
-                    value={editingWallet?.hideZeroBalanceTokens || false}
-                    onValueChange={(value) => {
-                      if (editingWallet) {
-                        // Update states immediately for instant UI response
-                        const updatedEditingWallet = {
-                          ...editingWallet,
+                  <Text style={styles.confirmButtonText}>Import Wallet</Text>
+                </TouchableOpacity>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        {/* Edit Wallet Modal */}
+        <SimpleActionSheet
+          ref={editWalletSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View testID="edit-wallet-sheet" style={styles.bottomSheetContent}>
+            <View style={styles.bottomSheetHeader}>
+              <View style={{ width: 32 }} />
+              <Text style={styles.bottomSheetTitle}>Edit Wallet</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  editWalletSheetRef.current?.dismiss();
+                  setEditingWallet(null);
+                }}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Menu Items */}
+            <ScrollView style={styles.settingsMenuList}>
+              <TouchableOpacity
+                testID="change-account-name-button"
+                style={styles.settingsMenuItem}
+                onPress={() => {
+                  editWalletSheetRef.current?.dismiss();
+                  setShowChangeNameModal(true);
+                }}
+              >
+                <Text style={styles.settingsMenuItemText}>
+                  Change Account Name
+                </Text>
+                <Text style={styles.settingsMenuItemArrow}>›</Text>
+              </TouchableOpacity>
+
+              {/* Hide Zero Balance Tokens Toggle */}
+              <View
+                testID="hide-zero-balance-toggle"
+                style={styles.settingsMenuItem}
+              >
+                <Text style={styles.settingsMenuItemText}>
+                  Hide Zero Balance Tokens
+                </Text>
+                <Switch
+                  value={editingWallet?.hideZeroBalanceTokens || false}
+                  onValueChange={(value) => {
+                    if (editingWallet) {
+                      // Update states immediately for instant UI response
+                      const updatedEditingWallet = {
+                        ...editingWallet,
+                        hideZeroBalanceTokens: value,
+                      };
+                      setEditingWallet(updatedEditingWallet);
+
+                      // Update selected wallet immediately if it's the one being edited
+                      if (selectedWallet?.id === editingWallet.id) {
+                        setSelectedWallet({
+                          ...selectedWallet,
                           hideZeroBalanceTokens: value,
-                        };
-                        setEditingWallet(updatedEditingWallet);
+                        });
+                      }
 
-                        // Update selected wallet immediately if it's the one being edited
-                        if (selectedWallet?.id === editingWallet.id) {
-                          setSelectedWallet({
-                            ...selectedWallet,
-                            hideZeroBalanceTokens: value,
-                          });
-                        }
+                      // Update wallets array and save to storage in background
+                      const updatedWallets = wallets.map((w) =>
+                        w.id === editingWallet.id
+                          ? { ...w, hideZeroBalanceTokens: value }
+                          : w
+                      );
+                      setWallets(updatedWallets);
+                      saveWalletsToStorage(updatedWallets);
+                    }
+                  }}
+                  trackColor={{ false: "#767577", true: "#4A90E2" }}
+                  thumbColor={
+                    editingWallet?.hideZeroBalanceTokens ? "#ffffff" : "#f4f3f4"
+                  }
+                />
+              </View>
 
-                        // Update wallets array and save to storage in background
+              <TouchableOpacity
+                testID="show-private-key-button"
+                style={styles.settingsMenuItem}
+                onPress={() => {
+                  editWalletSheetRef.current?.dismiss();
+                  setTimeout(() => {
+                    setShowAuthForPrivateKey(true);
+                  }, 100);
+                }}
+              >
+                <Text style={styles.settingsMenuItemText}>
+                  Show Private Key
+                </Text>
+                <Text style={styles.settingsMenuItemArrow}>›</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                testID="delete-account-button"
+                style={styles.settingsMenuItem}
+                onPress={async () => {
+                  if (editingWallet) {
+                    const updatedWallets = wallets.filter(
+                      (w) => w.id !== editingWallet.id
+                    );
+                    setWallets(updatedWallets);
+                    await saveWalletsToStorage(updatedWallets);
+                    editWalletSheetRef.current?.dismiss();
+                    setEditingWallet(null);
+                    Toast.show({
+                      type: "success",
+                      text1: "Account Deleted",
+                      text2: `${editingWallet.name} has been deleted`,
+                      position: "bottom",
+                    });
+                  }
+                }}
+              >
+                <Text
+                  style={[styles.settingsMenuItemText, { color: "#FF4444" }]}
+                >
+                  Delete Account
+                </Text>
+                <Text style={styles.settingsMenuItemArrow}>›</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </SimpleActionSheet>
+
+        {/* Change Name Modal */}
+        <Modal
+          visible={showChangeNameModal}
+          transparent={true}
+          animationType="slide"
+        >
+          <Pressable
+            style={styles.settingsDrawerOverlay}
+            onPress={() => {
+              console.log("OVERLAY PRESSED - Cancelling changes");
+              // Reset to original name
+              if (editingWallet) {
+                setEditWalletName(editingWallet.name);
+              }
+              setShowChangeNameModal(false);
+              editWalletSheetRef.current?.dismiss();
+              setEditingWallet(null);
+            }}
+          >
+            <Pressable
+              style={[
+                styles.settingsDrawerContent,
+                { backgroundColor: easterEggMode ? "#111827" : "#000" },
+              ]}
+              onPress={(e) => e.stopPropagation()}
+            >
+              <View style={styles.settingsDrawerContentArea}>
+                <View style={styles.settingsDrawerHeader}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      console.log(
+                        "BACK BUTTON PRESSED (<) - Cancelling changes"
+                      );
+                      // Reset to original name
+                      if (editingWallet) {
+                        setEditWalletName(editingWallet.name);
+                      }
+                      setShowChangeNameModal(false);
+                      editWalletSheetRef.current?.dismiss();
+                      setEditingWallet(null);
+                    }}
+                  >
+                    <Text style={styles.settingsDrawerClose}>‹</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.settingsDrawerTitle}>Change Name</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      console.log("X BUTTON PRESSED - Cancelling changes");
+                      // Reset to original name
+                      if (editingWallet) {
+                        setEditWalletName(editingWallet.name);
+                      }
+                      setShowChangeNameModal(false);
+                      editWalletSheetRef.current?.dismiss();
+                      setEditingWallet(null);
+                    }}
+                  >
+                    <Text style={styles.settingsDrawerClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.inputLabel}>Account Name</Text>
+                <TextInput
+                  testID="account-name-input"
+                  style={styles.walletNameInput}
+                  placeholder="Wallet Name"
+                  placeholderTextColor="#666666"
+                  value={editWalletName}
+                  onChangeText={(text) => {
+                    setEditWalletName(text);
+                  }}
+                  autoCorrect={false}
+                />
+
+                <View style={styles.changeNameButtonContainer}>
+                  <TouchableOpacity
+                    style={styles.changeNameCancelButton}
+                    onPress={() => {
+                      console.log("CANCEL BUTTON PRESSED - Discarding changes");
+                      // Reset to original name
+                      if (editingWallet) {
+                        setEditWalletName(editingWallet.name);
+                      }
+                      setShowChangeNameModal(false);
+                      editWalletSheetRef.current?.dismiss();
+                      setEditingWallet(null);
+                    }}
+                  >
+                    <Text style={styles.changeNameCancelButtonText}>
+                      Cancel
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.changeNameConfirmButton,
+                      !editWalletName.trim() &&
+                        styles.changeNameConfirmButtonDisabled,
+                    ]}
+                    onPress={() => {
+                      console.log("CONFIRM BUTTON PRESSED");
+                      console.log("editingWallet:", editingWallet);
+                      console.log("editWalletName:", editWalletName);
+                      if (editingWallet && editWalletName.trim()) {
+                        console.log(
+                          "Saving wallet name:",
+                          editWalletName.trim()
+                        );
                         const updatedWallets = wallets.map((w) =>
                           w.id === editingWallet.id
-                            ? { ...w, hideZeroBalanceTokens: value }
+                            ? { ...w, name: editWalletName.trim() }
                             : w
                         );
                         setWallets(updatedWallets);
                         saveWalletsToStorage(updatedWallets);
+                        console.log("Closing both modals");
+                        setShowChangeNameModal(false);
+                        editWalletSheetRef.current?.dismiss();
+                        setEditingWallet(null);
+                      } else {
+                        console.log("Not saving - wallet or name is empty");
                       }
                     }}
-                    trackColor={{ false: "#767577", true: "#4A90E2" }}
-                    thumbColor={
-                      editingWallet?.hideZeroBalanceTokens
-                        ? "#ffffff"
-                        : "#f4f3f4"
-                    }
-                  />
-                </View>
-
-                <TouchableOpacity
-                  testID="show-private-key-button"
-                  style={styles.settingsMenuItem}
-                  onPress={() => {
-                    editWalletSheetRef.current?.dismiss();
-                    setTimeout(() => {
-                      setShowAuthForPrivateKey(true);
-                    }, 100);
-                  }}
-                >
-                  <Text style={styles.settingsMenuItemText}>
-                    Show Private Key
-                  </Text>
-                  <Text style={styles.settingsMenuItemArrow}>›</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  testID="delete-account-button"
-                  style={styles.settingsMenuItem}
-                  onPress={async () => {
-                    if (editingWallet) {
-                      const updatedWallets = wallets.filter(
-                        (w) => w.id !== editingWallet.id
-                      );
-                      setWallets(updatedWallets);
-                      await saveWalletsToStorage(updatedWallets);
-                      editWalletSheetRef.current?.dismiss();
-                      setEditingWallet(null);
-                      Toast.show({
-                        type: "success",
-                        text1: "Account Deleted",
-                        text2: `${editingWallet.name} has been deleted`,
-                        position: "bottom",
-                      });
-                    }
-                  }}
-                >
-                  <Text
-                    style={[styles.settingsMenuItemText, { color: "#FF4444" }]}
+                    disabled={!editWalletName.trim()}
                   >
-                    Delete Account
-                  </Text>
-                  <Text style={styles.settingsMenuItemArrow}>›</Text>
-                </TouchableOpacity>
-              </ScrollView>
-            </View>
-          </SimpleActionSheet>
-
-          {/* Change Name Modal */}
-          <Modal
-            visible={showChangeNameModal}
-            transparent={true}
-            animationType="slide"
-          >
-            <Pressable
-              style={styles.settingsDrawerOverlay}
-              onPress={() => {
-                console.log("OVERLAY PRESSED - Cancelling changes");
-                // Reset to original name
-                if (editingWallet) {
-                  setEditWalletName(editingWallet.name);
-                }
-                setShowChangeNameModal(false);
-                editWalletSheetRef.current?.dismiss();
-                setEditingWallet(null);
-              }}
-            >
-              <Pressable
-                style={[
-                  styles.settingsDrawerContent,
-                  { backgroundColor: easterEggMode ? "#111827" : "#000" },
-                ]}
-                onPress={(e) => e.stopPropagation()}
-              >
-                <View style={styles.settingsDrawerContentArea}>
-                  <View style={styles.settingsDrawerHeader}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        console.log(
-                          "BACK BUTTON PRESSED (<) - Cancelling changes"
-                        );
-                        // Reset to original name
-                        if (editingWallet) {
-                          setEditWalletName(editingWallet.name);
-                        }
-                        setShowChangeNameModal(false);
-                        editWalletSheetRef.current?.dismiss();
-                        setEditingWallet(null);
-                      }}
-                    >
-                      <Text style={styles.settingsDrawerClose}>‹</Text>
-                    </TouchableOpacity>
-                    <Text style={styles.settingsDrawerTitle}>Change Name</Text>
-                    <TouchableOpacity
-                      onPress={() => {
-                        console.log("X BUTTON PRESSED - Cancelling changes");
-                        // Reset to original name
-                        if (editingWallet) {
-                          setEditWalletName(editingWallet.name);
-                        }
-                        setShowChangeNameModal(false);
-                        editWalletSheetRef.current?.dismiss();
-                        setEditingWallet(null);
-                      }}
-                    >
-                      <Text style={styles.settingsDrawerClose}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <Text style={styles.inputLabel}>Account Name</Text>
-                  <TextInput
-                    testID="account-name-input"
-                    style={styles.walletNameInput}
-                    placeholder="Wallet Name"
-                    placeholderTextColor="#666666"
-                    value={editWalletName}
-                    onChangeText={(text) => {
-                      setEditWalletName(text);
-                    }}
-                    autoCorrect={false}
-                  />
-
-                  <View style={styles.changeNameButtonContainer}>
-                    <TouchableOpacity
-                      style={styles.changeNameCancelButton}
-                      onPress={() => {
-                        console.log(
-                          "CANCEL BUTTON PRESSED - Discarding changes"
-                        );
-                        // Reset to original name
-                        if (editingWallet) {
-                          setEditWalletName(editingWallet.name);
-                        }
-                        setShowChangeNameModal(false);
-                        editWalletSheetRef.current?.dismiss();
-                        setEditingWallet(null);
-                      }}
-                    >
-                      <Text style={styles.changeNameCancelButtonText}>
-                        Cancel
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[
-                        styles.changeNameConfirmButton,
-                        !editWalletName.trim() &&
-                          styles.changeNameConfirmButtonDisabled,
-                      ]}
-                      onPress={() => {
-                        console.log("CONFIRM BUTTON PRESSED");
-                        console.log("editingWallet:", editingWallet);
-                        console.log("editWalletName:", editWalletName);
-                        if (editingWallet && editWalletName.trim()) {
-                          console.log(
-                            "Saving wallet name:",
-                            editWalletName.trim()
-                          );
-                          const updatedWallets = wallets.map((w) =>
-                            w.id === editingWallet.id
-                              ? { ...w, name: editWalletName.trim() }
-                              : w
-                          );
-                          setWallets(updatedWallets);
-                          saveWalletsToStorage(updatedWallets);
-                          console.log("Closing both modals");
-                          setShowChangeNameModal(false);
-                          editWalletSheetRef.current?.dismiss();
-                          setEditingWallet(null);
-                        } else {
-                          console.log("Not saving - wallet or name is empty");
-                        }
-                      }}
-                      disabled={!editWalletName.trim()}
-                    >
-                      <Text style={styles.changeNameConfirmButtonText}>
-                        Confirm
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
+                    <Text style={styles.changeNameConfirmButtonText}>
+                      Confirm
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-              </Pressable>
-            </Pressable>
-          </Modal>
-
-          {/* View Private Key Bottom Sheet */}
-          <SimpleActionSheet
-            ref={privateKeySheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              <View style={styles.bottomSheetHeader}>
-                <View style={{ width: 32 }} />
-                <Text style={styles.bottomSheetTitle}>Private Key</Text>
-                <TouchableOpacity
-                  onPress={() => {
-                    privateKeySheetRef.current?.dismiss();
-                  }}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
               </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
-              {editingWallet && (
-                <View style={styles.privateKeyContainer}>
-                  <View style={styles.privateKeyHeader}>
-                    <Text style={styles.privateKeyLabel}>Private Key:</Text>
-                    {editingWallet.secretKey && (
+        {/* View Private Key Bottom Sheet */}
+        <SimpleActionSheet
+          ref={privateKeySheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            <View style={styles.bottomSheetHeader}>
+              <View style={{ width: 32 }} />
+              <Text style={styles.bottomSheetTitle}>Private Key</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  privateKeySheetRef.current?.dismiss();
+                }}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {editingWallet && (
+              <View style={styles.privateKeyContainer}>
+                <View style={styles.privateKeyHeader}>
+                  <Text style={styles.privateKeyLabel}>Private Key:</Text>
+                  {editingWallet.secretKey && (
+                    <TouchableOpacity
+                      style={styles.bottomSheetCopyBtn}
+                      onPress={() => {
+                        Clipboard.setString(
+                          bs58.encode(new Uint8Array(editingWallet.secretKey))
+                        );
+                        ToastAndroid.show(
+                          "Private key copied!",
+                          ToastAndroid.SHORT
+                        );
+                      }}
+                    >
+                      <Text style={styles.bottomSheetCopyIcon}>⧉</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+                {editingWallet.secretKey ? (
+                  <Text style={styles.privateKeyText} selectable={true}>
+                    {bs58.encode(new Uint8Array(editingWallet.secretKey))}
+                  </Text>
+                ) : (
+                  <Text style={styles.privateKeyText}>
+                    Not available. This is a hardware wallet (Ledger).
+                  </Text>
+                )}
+              </View>
+            )}
+          </View>
+        </SimpleActionSheet>
+
+        {/* View Seed Phrase Bottom Sheet */}
+        <SimpleActionSheet
+          ref={seedPhraseSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
+          >
+            <View style={styles.bottomSheetHeader}>
+              <View style={{ width: 32 }} />
+              <Text style={styles.bottomSheetTitle}>Seed Phrase</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  seedPhraseSheetRef.current?.dismiss();
+                  setWalletSeedPhraseForDisplay(null);
+                  setWalletSeedPhraseLoading(false);
+                }}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {editingWallet && (
+              <View style={styles.privateKeyContainer}>
+                <View style={styles.privateKeyHeader}>
+                  <Text style={styles.privateKeyLabel}>
+                    Seed Phrase (Recovery Phrase):
+                  </Text>
+                  {!editingWallet.derivationPath &&
+                    walletSeedPhraseForDisplay &&
+                    !walletSeedPhraseLoading && (
                       <TouchableOpacity
                         style={styles.bottomSheetCopyBtn}
                         onPress={() => {
-                          Clipboard.setString(
-                            bs58.encode(new Uint8Array(editingWallet.secretKey))
-                          );
+                          Clipboard.setString(walletSeedPhraseForDisplay);
                           ToastAndroid.show(
-                            "Private key copied!",
+                            "Seed phrase copied!",
                             ToastAndroid.SHORT
                           );
                         }}
@@ -6599,340 +5988,562 @@ function AppContent() {
                         <Text style={styles.bottomSheetCopyIcon}>⧉</Text>
                       </TouchableOpacity>
                     )}
-                  </View>
-                  {editingWallet.secretKey ? (
-                    <Text style={styles.privateKeyText} selectable={true}>
-                      {bs58.encode(new Uint8Array(editingWallet.secretKey))}
-                    </Text>
-                  ) : (
-                    <Text style={styles.privateKeyText}>
-                      Not available. This is a hardware wallet (Ledger).
-                    </Text>
-                  )}
                 </View>
-              )}
-            </View>
-          </SimpleActionSheet>
 
-          {/* View Seed Phrase Bottom Sheet */}
-          <SimpleActionSheet
-            ref={seedPhraseSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
+                {editingWallet.derivationPath ? (
+                  <Text style={styles.privateKeyText}>
+                    This wallet is derived from your master seed phrase. Go to
+                    Manage Security {"->"} Export Seed Phrase to view or back it
+                    up.
+                  </Text>
+                ) : walletSeedPhraseLoading ? (
+                  <Text style={styles.privateKeyText}>
+                    Loading seed phrase...
+                  </Text>
+                ) : walletSeedPhraseForDisplay ? (
+                  <Text style={styles.seedPhraseText} selectable={true}>
+                    {walletSeedPhraseForDisplay}
+                  </Text>
+                ) : (
+                  <Text style={styles.privateKeyText}>
+                    No stored recovery phrase was found for this wallet.
+                  </Text>
+                )}
+              </View>
+            )}
+          </View>
+        </SimpleActionSheet>
+
+        {/* Ledger Connection Bottom Sheet */}
+        <SimpleActionSheet
+          ref={ledgerSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
           >
             <View
               style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
+                styles.bottomSheetHeader,
+                { paddingTop: Math.max(insets.top, 8) },
               ]}
             >
-              <View style={styles.bottomSheetHeader}>
-                <View style={{ width: 32 }} />
-                <Text style={styles.bottomSheetTitle}>Seed Phrase</Text>
-                <TouchableOpacity
-                  onPress={() => {
-                    seedPhraseSheetRef.current?.dismiss();
-                    setWalletSeedPhraseForDisplay(null);
-                    setWalletSeedPhraseLoading(false);
-                  }}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
+              <View style={{ width: 32 }} />
+              <Text style={styles.bottomSheetTitle}>Connect Ledger</Text>
+              <TouchableOpacity
+                onPress={() => ledgerSheetRef.current?.dismiss()}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
 
-              {editingWallet && (
-                <View style={styles.privateKeyContainer}>
-                  <View style={styles.privateKeyHeader}>
-                    <Text style={styles.privateKeyLabel}>
-                      Seed Phrase (Recovery Phrase):
+            {/* Discovered Devices List or Account Selection */}
+            <View style={styles.ledgerAccountsList}>
+              {ledgerAccounts.length > 0 ? (
+                // Account Selection UI - Prettier Design
+                <>
+                  <View style={{ paddingHorizontal: 20, paddingTop: 10 }}>
+                    <Text style={styles.ledgerStatusText}>Select Account</Text>
+                    <Text style={styles.ledgerStatusSubtext}>
+                      Choose which account to import
                     </Text>
-                    {!editingWallet.derivationPath &&
-                      walletSeedPhraseForDisplay &&
-                      !walletSeedPhraseLoading && (
-                        <TouchableOpacity
-                          style={styles.bottomSheetCopyBtn}
-                          onPress={() => {
-                            Clipboard.setString(walletSeedPhraseForDisplay);
-                            ToastAndroid.show(
-                              "Seed phrase copied!",
-                              ToastAndroid.SHORT
-                            );
+                  </View>
+                  <FlatList
+                    data={ledgerAccounts}
+                    keyExtractor={(item) => item.index.toString()}
+                    contentContainerStyle={{
+                      paddingHorizontal: 20,
+                      paddingTop: 16,
+                    }}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        onPress={() => handleSelectLedgerAccount(item)}
+                        style={{
+                          backgroundColor: "#1a1a1a",
+                          borderRadius: 12,
+                          padding: 16,
+                          marginBottom: 12,
+                          borderWidth: 1,
+                          borderColor: "rgba(255, 255, 255, 0.1)",
+                        }}
+                      >
+                        <View
+                          style={{ flexDirection: "row", alignItems: "center" }}
+                        >
+                          {/* Account Icon */}
+                          <View
+                            style={{
+                              width: 40,
+                              height: 40,
+                              borderRadius: 20,
+                              backgroundColor: "#4A90E2",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              marginRight: 12,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: "#FFFFFF",
+                                fontSize: 16,
+                                fontWeight: "600",
+                              }}
+                            >
+                              {item.index + 1}
+                            </Text>
+                          </View>
+                          {/* Account Info */}
+                          <View style={{ flex: 1 }}>
+                            <Text
+                              style={{
+                                color: "#FFFFFF",
+                                fontSize: 16,
+                                fontWeight: "600",
+                                marginBottom: 4,
+                              }}
+                            >
+                              Account {item.index + 1}
+                            </Text>
+                            <Text
+                              style={{ color: "#999999", fontSize: 12 }}
+                              numberOfLines={1}
+                            >
+                              {item.address.slice(0, 8)}...
+                              {item.address.slice(-8)}
+                            </Text>
+                          </View>
+                          {/* Arrow */}
+                          <Text
+                            style={{
+                              color: "rgba(255, 255, 255, 0.4)",
+                              fontSize: 20,
+                            }}
+                          >
+                            ›
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                  />
+                </>
+              ) : ledgerScanning && discoveredDevices.length === 0 ? (
+                // Scanning UI
+                <View style={styles.ledgerStatus}>
+                  <Text style={styles.ledgerStatusText}>
+                    Scanning for devices...
+                  </Text>
+                  <Text style={styles.ledgerStatusSubtext}>
+                    Please ensure your Ledger is unlocked and Bluetooth is on.
+                  </Text>
+                </View>
+              ) : (
+                // Device Discovery UI
+                <FlatList
+                  data={discoveredDevices}
+                  keyExtractor={(item) => item.id}
+                  ListFooterComponent={
+                    ledgerConnecting ? (
+                      // Wallet Discovery Progress Indicator - Simple centered design
+                      <View
+                        style={{
+                          alignItems: "center",
+                          paddingVertical: 24,
+                          paddingHorizontal: 40,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color: "rgba(255, 255, 255, 0.6)",
+                            fontSize: 13,
+                            marginBottom: 12,
+                            textAlign: "center",
                           }}
                         >
-                          <Text style={styles.bottomSheetCopyIcon}>⧉</Text>
-                        </TouchableOpacity>
-                      )}
-                  </View>
+                          {ledgerWalletProgress > 0
+                            ? `Discovering wallets ${ledgerWalletProgress}/5`
+                            : "Connecting to Ledger..."}
+                        </Text>
+                        {ledgerWalletProgress > 0 && (
+                          <>
+                            <View
+                              style={{
+                                width: "100%",
+                                height: 3,
+                                backgroundColor: "rgba(74, 144, 226, 0.15)",
+                                borderRadius: 1.5,
+                                overflow: "hidden",
+                                marginBottom: 12,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  width: `${(ledgerWalletProgress / 5) * 100}%`,
+                                  height: "100%",
+                                  backgroundColor: "#4A90E2",
+                                }}
+                              />
+                            </View>
+                            <Text
+                              style={{
+                                color: "rgba(255, 255, 255, 0.4)",
+                                fontSize: 11,
+                                textAlign: "center",
+                              }}
+                            >
+                              {ledgerAccounts
+                                .slice(0, ledgerWalletProgress)
+                                .map((acc, i) => acc.address.slice(0, 4))
+                                .join(" • ")}
+                            </Text>
+                          </>
+                        )}
+                      </View>
+                    ) : null
+                  }
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.ledgerAccount}
+                      onPress={async () => {
+                        // Stop scanning before connecting
+                        if (ledgerScanSubscriptionRef.current) {
+                          try {
+                            ledgerScanSubscriptionRef.current.unsubscribe();
+                            ledgerScanSubscriptionRef.current = null;
+                          } catch (e) {}
+                        }
+                        setLedgerScanning(false);
 
-                  {editingWallet.derivationPath ? (
-                    <Text style={styles.privateKeyText}>
-                      This wallet is derived from your master seed phrase. Go to
-                      Manage Security {"->"} Export Seed Phrase to view or back
-                      it up.
-                    </Text>
-                  ) : walletSeedPhraseLoading ? (
-                    <Text style={styles.privateKeyText}>
-                      Loading seed phrase...
-                    </Text>
-                  ) : walletSeedPhraseForDisplay ? (
-                    <Text style={styles.seedPhraseText} selectable={true}>
-                      {walletSeedPhraseForDisplay}
-                    </Text>
-                  ) : (
-                    <Text style={styles.privateKeyText}>
-                      No stored recovery phrase was found for this wallet.
-                    </Text>
+                        // Store device name
+                        const deviceName =
+                          item.deviceName ||
+                          item.name ||
+                          item.localName ||
+                          "Ledger Device";
+                        setLedgerDeviceName(deviceName);
+
+                        // Connect
+                        connectToLedger(item);
+                      }}
+                    >
+                      <View style={styles.ledgerAccountLeft}>
+                        <View style={styles.ledgerAccountInfo}>
+                          <Text style={styles.ledgerAccountIndex}>
+                            {item.deviceName ||
+                              item.name ||
+                              item.localName ||
+                              "Unknown Device"}
+                          </Text>
+                          <Text style={styles.ledgerAccountAddress}>
+                            ID: {item.id}
+                          </Text>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
                   )}
-                </View>
+                  ListEmptyComponent={
+                    !ledgerScanning && (
+                      <Text style={styles.debugNoLogs}>
+                        No devices found. Pull to refresh or try again.
+                      </Text>
+                    )
+                  }
+                />
               )}
             </View>
-          </SimpleActionSheet>
 
-          {/* Transaction Confirmation Bottom Sheet */}
-          <SimpleActionSheet
-            ref={confirmTransactionSheetRef}
-            snapPoints={["45%"]}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
+            {/* Custom toast notification for Ledger errors */}
+            {ledgerError ? (
+              <TouchableOpacity
+                onPress={() => {
+                  // If error is about Bluetooth, open settings
+                  if (ledgerError.includes("Bluetooth")) {
+                    Linking.openSettings();
+                  }
+                }}
+                activeOpacity={ledgerError.includes("Bluetooth") ? 0.7 : 1}
+              >
+                <Animated.View
+                  style={{
+                    position: "absolute",
+                    bottom: 20,
+                    left: 20,
+                    right: 20,
+                    backgroundColor: "#1a1a1a",
+                    borderRadius: 8,
+                    padding: 16,
+                    borderLeftWidth: 4,
+                    borderLeftColor: "#4A90E2",
+                    minWidth: 300,
+                    transform: [{ translateY: ledgerErrorSlideAnim }],
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "#FFFFFF",
+                      fontWeight: "600",
+                      fontSize: 14,
+                    }}
+                  >
+                    Duplicate Wallet
+                  </Text>
+                  <Text
+                    style={{
+                      color: "#999999",
+                      fontSize: 12,
+                      marginTop: 4,
+                    }}
+                  >
+                    {ledgerError}
+                  </Text>
+                </Animated.View>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </SimpleActionSheet>
+
+        {/* Transaction Confirmation Bottom Sheet */}
+        <SimpleActionSheet
+          ref={confirmTransactionSheetRef}
+          snapPoints={["45%"]}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View
+            style={[
+              styles.bottomSheetContent,
+              { backgroundColor: easterEggMode ? "#111827" : "#000" },
+            ]}
           >
-            <View
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: easterEggMode ? "#111827" : "#000" },
-              ]}
-            >
-              <View style={styles.bottomSheetHeader}>
-                <View style={{ width: 32 }} />
-                <Text style={styles.bottomSheetTitle}>Confirm Transaction</Text>
+            <View style={styles.bottomSheetHeader}>
+              <View style={{ width: 32 }} />
+              <Text style={styles.bottomSheetTitle}>Confirm Transaction</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  confirmTransactionSheetRef.current?.dismiss();
+                  setPendingTransaction(null);
+                }}
+              >
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {pendingTransaction && (
+              <View style={{ paddingHorizontal: 20, paddingTop: 20 }}>
+                {/* Transaction details */}
+                <View
+                  style={{
+                    backgroundColor: "#1a1a1a",
+                    borderRadius: 12,
+                    padding: 16,
+                    marginBottom: 20,
+                  }}
+                >
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      marginBottom: 12,
+                    }}
+                  >
+                    <Text style={{ color: "#999", fontSize: 14 }}>Amount</Text>
+                    <Text
+                      style={{ color: "#fff", fontSize: 14, fontWeight: "600" }}
+                    >
+                      {pendingTransaction.amount}{" "}
+                      {currentNetwork.nativeToken.symbol}
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      marginBottom: 12,
+                    }}
+                  >
+                    <Text style={{ color: "#999", fontSize: 14 }}>To</Text>
+                    <Text
+                      style={{
+                        color: "#fff",
+                        fontSize: 12,
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {pendingTransaction.address.substring(0, 8)}...
+                      {pendingTransaction.address.substring(
+                        pendingTransaction.address.length - 8
+                      )}
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <Text style={{ color: "#999", fontSize: 14 }}>
+                      Network Fee
+                    </Text>
+                    <Text style={{ color: "#fff", fontSize: 14 }}>
+                      ~0.000005 {currentNetwork.nativeToken.symbol}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Biometric or Approve button */}
+                {biometricAvailable ? (
+                  <View
+                    style={{
+                      alignItems: "center",
+                      marginBottom: 20,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color: "#4A90E2",
+                        fontSize: 16,
+                        marginBottom: 12,
+                      }}
+                    >
+                      Confirm
+                    </Text>
+                    <TouchableOpacity
+                      onPress={confirmTransactionWithBiometric}
+                      style={{
+                        padding: 10,
+                      }}
+                    >
+                      <Image
+                        source={require("./assets/fingerprint.png")}
+                        style={{
+                          width: 95,
+                          height: 95,
+                          opacity: 0.5,
+                        }}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    onPress={confirmTransactionWithBiometric}
+                    style={{
+                      backgroundColor: "#4A90E2",
+                      paddingVertical: 16,
+                      borderRadius: 8,
+                      alignItems: "center",
+                      marginBottom: 12,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color: "#fff",
+                        fontSize: 16,
+                        fontWeight: "600",
+                      }}
+                    >
+                      Approve Transaction
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
                 <TouchableOpacity
                   onPress={() => {
                     confirmTransactionSheetRef.current?.dismiss();
                     setPendingTransaction(null);
                   }}
-                >
-                  <Text style={styles.bottomSheetClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              {pendingTransaction && (
-                <View style={{ paddingHorizontal: 20, paddingTop: 20 }}>
-                  {/* Transaction details */}
-                  <View
-                    style={{
-                      backgroundColor: "#1a1a1a",
-                      borderRadius: 12,
-                      padding: 16,
-                      marginBottom: 20,
-                    }}
-                  >
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                        marginBottom: 12,
-                      }}
-                    >
-                      <Text style={{ color: "#999", fontSize: 14 }}>
-                        Amount
-                      </Text>
-                      <Text
-                        style={{
-                          color: "#fff",
-                          fontSize: 14,
-                          fontWeight: "600",
-                        }}
-                      >
-                        {pendingTransaction.amount}{" "}
-                        {currentNetwork.nativeToken.symbol}
-                      </Text>
-                    </View>
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                        marginBottom: 12,
-                      }}
-                    >
-                      <Text style={{ color: "#999", fontSize: 14 }}>To</Text>
-                      <Text
-                        style={{
-                          color: "#fff",
-                          fontSize: 12,
-                          fontFamily: "monospace",
-                        }}
-                      >
-                        {pendingTransaction.address.substring(0, 8)}...
-                        {pendingTransaction.address.substring(
-                          pendingTransaction.address.length - 8
-                        )}
-                      </Text>
-                    </View>
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <Text style={{ color: "#999", fontSize: 14 }}>
-                        Network Fee
-                      </Text>
-                      <Text style={{ color: "#fff", fontSize: 14 }}>
-                        ~0.000005 {currentNetwork.nativeToken.symbol}
-                      </Text>
-                    </View>
-                  </View>
-
-                  {/* Biometric or Approve button */}
-                  {biometricAvailable ? (
-                    <View
-                      style={{
-                        alignItems: "center",
-                        marginBottom: 20,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: "#4A90E2",
-                          fontSize: 16,
-                          marginBottom: 12,
-                        }}
-                      >
-                        Confirm
-                      </Text>
-                      <TouchableOpacity
-                        onPress={confirmTransactionWithBiometric}
-                        style={{
-                          padding: 10,
-                        }}
-                      >
-                        <Image
-                          source={require("./assets/fingerprint.png")}
-                          style={{
-                            width: 95,
-                            height: 95,
-                            opacity: 0.5,
-                          }}
-                        />
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      onPress={confirmTransactionWithBiometric}
-                      style={{
-                        backgroundColor: "#4A90E2",
-                        paddingVertical: 16,
-                        borderRadius: 8,
-                        alignItems: "center",
-                        marginBottom: 12,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: "#fff",
-                          fontSize: 16,
-                          fontWeight: "600",
-                        }}
-                      >
-                        Approve Transaction
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-
-                  <TouchableOpacity
-                    onPress={() => {
-                      confirmTransactionSheetRef.current?.dismiss();
-                      setPendingTransaction(null);
-                    }}
-                    style={{
-                      paddingVertical: 12,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Text style={{ color: "#999", fontSize: 14 }}>Cancel</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          </SimpleActionSheet>
-
-          {/* Browser BottomSheet */}
-          <SimpleActionSheet
-            ref={browserSheetRef}
-            backgroundColor={easterEggMode ? "#111827" : "#000"}
-          >
-            <View style={{ flex: 1 }}>
-              <View style={styles.sheetHeader}>
-                <Text style={styles.sheetTitle}>Browser</Text>
-                <TouchableOpacity
-                  onPress={() => browserSheetRef.current?.dismiss()}
-                >
-                  <Text style={styles.closeButton}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* URL Input */}
-              <View style={styles.urlInputContainer}>
-                <TextInput
-                  style={styles.urlInput}
-                  value={browserInputUrl}
-                  onChangeText={(text) => {
-                    console.log("URL input changed:", text);
-                    setBrowserInputUrl(text);
-                  }}
-                  placeholder="Enter URL"
-                  placeholderTextColor="#666"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-                <TouchableOpacity
-                  style={styles.goButton}
-                  onPress={() => {
-                    console.log(
-                      "Go button pressed! Loading URL:",
-                      browserInputUrl
-                    );
-
-                    // Sanitize and validate URL
-                    let url = browserInputUrl.trim();
-
-                    // Add protocol if missing
-                    if (
-                      url &&
-                      !url.startsWith("http://") &&
-                      !url.startsWith("https://")
-                    ) {
-                      url = "https://" + url;
-                    }
-
-                    // Remove spaces (common typo)
-                    url = url.replace(/\s+/g, "");
-
-                    console.log("Sanitized URL:", url);
-                    setBrowserUrl(url);
-                    console.log("browserUrl state updated to:", url);
-
-                    // Force reload if WebView is already loaded
-                    if (webViewRef.current) {
-                      setTimeout(() => {
-                        webViewRef.current.reload();
-                      }, 100);
-                    }
+                  style={{
+                    paddingVertical: 12,
+                    alignItems: "center",
                   }}
                 >
-                  <Text style={styles.goButtonText}>Go</Text>
+                  <Text style={{ color: "#999", fontSize: 14 }}>Cancel</Text>
                 </TouchableOpacity>
               </View>
+            )}
+          </View>
+        </SimpleActionSheet>
 
-              {/* WebView */}
-              <View
-                style={{ flex: 1, backgroundColor: "#FF0000", marginTop: 10 }}
+        {/* Browser BottomSheet */}
+        <SimpleActionSheet
+          ref={browserSheetRef}
+          backgroundColor={easterEggMode ? "#111827" : "#000"}
+        >
+          <View style={{ flex: 1 }}>
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>Browser</Text>
+              <TouchableOpacity
+                onPress={() => browserSheetRef.current?.dismiss()}
               >
-                <WebView
-                  key={browserUrl}
-                  source={{ uri: browserUrl }}
-                  style={{ flex: 1, backgroundColor: "#00FF00" }}
-                  javaScriptEnabled={true}
-                  domStorageEnabled={true}
-                  onMessage={handleWebViewMessage}
-                  injectedJavaScriptBeforeContentLoaded={`
+                <Text style={styles.closeButton}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* URL Input */}
+            <View style={styles.urlInputContainer}>
+              <TextInput
+                style={styles.urlInput}
+                value={browserInputUrl}
+                onChangeText={(text) => {
+                  console.log("URL input changed:", text);
+                  setBrowserInputUrl(text);
+                }}
+                placeholder="Enter URL"
+                placeholderTextColor="#666"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={styles.goButton}
+                onPress={() => {
+                  console.log(
+                    "Go button pressed! Loading URL:",
+                    browserInputUrl
+                  );
+
+                  // Sanitize and validate URL
+                  let url = browserInputUrl.trim();
+
+                  // Add protocol if missing
+                  if (
+                    url &&
+                    !url.startsWith("http://") &&
+                    !url.startsWith("https://")
+                  ) {
+                    url = "https://" + url;
+                  }
+
+                  // Remove spaces (common typo)
+                  url = url.replace(/\s+/g, "");
+
+                  console.log("Sanitized URL:", url);
+                  setBrowserUrl(url);
+                  console.log("browserUrl state updated to:", url);
+
+                  // Force reload if WebView is already loaded
+                  if (webViewRef.current) {
+                    setTimeout(() => {
+                      webViewRef.current.reload();
+                    }, 100);
+                  }
+                }}
+              >
+                <Text style={styles.goButtonText}>Go</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* WebView */}
+            <View
+              style={{ flex: 1, backgroundColor: "#FF0000", marginTop: 10 }}
+            >
+              <WebView
+                key={browserUrl}
+                source={{ uri: browserUrl }}
+                style={{ flex: 1, backgroundColor: "#00FF00" }}
+                javaScriptEnabled={true}
+                domStorageEnabled={true}
+                onMessage={handleWebViewMessage}
+                injectedJavaScriptBeforeContentLoaded={`
                 (function() {
                   // Create a promise-based request system
                   let requestId = 0;
@@ -7051,535 +6662,11 @@ function AppContent() {
                   console.log('window.x1 API initialized');
                 })();
               `}
-                />
-              </View>
-            </View>
-          </SimpleActionSheet>
-        </GestureHandlerRootView>
-      )}
-      {/* Ledger Connection Bottom Sheet */}
-      <SimpleActionSheet
-        ref={ledgerSheetRef}
-        backgroundColor={easterEggMode ? "#111827" : "#000"}
-      >
-        <View
-          style={[
-            styles.bottomSheetContent,
-            { backgroundColor: easterEggMode ? "#111827" : "#000" },
-          ]}
-        >
-          <View style={[styles.bottomSheetHeader, { paddingTop: 8 }]}>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => ledgerSheetRef.current?.dismiss()}>
-              <Text style={styles.bottomSheetClose}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Check BLE Status Button */}
-          {false && (
-            <View style={{ paddingHorizontal: 20, paddingTop: 12 }}>
-              <TouchableOpacity
-                onPress={checkBLEStatus}
-                style={{
-                  backgroundColor: "#2a2a2a",
-                  borderRadius: 8,
-                  padding: 12,
-                  borderWidth: 1,
-                  borderColor: "rgba(74, 144, 226, 0.3)",
-                }}
-              >
-                <Text
-                  style={{
-                    color: "#4A90E2",
-                    fontSize: 14,
-                    fontWeight: "600",
-                    textAlign: "center",
-                  }}
-                >
-                  📊 Check BLE Status
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {/* Discovered Devices List or Account Selection */}
-          <View style={styles.ledgerAccountsList}>
-            {ledgerAccounts.length > 0 ? (
-              // Account Selection UI - Compact Design
-              <>
-                <View
-                  style={{
-                    paddingHorizontal: 16,
-                    paddingTop: 8,
-                    flexDirection: "row",
-                    alignItems: "center",
-                  }}
-                >
-                  {ledgerWalletProgress > 0 && (
-                    <ActivityIndicator
-                      size="small"
-                      color="#4A90E2"
-                      style={{ marginRight: 8 }}
-                    />
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={{
-                        color: "#FFFFFF",
-                        fontSize: 14,
-                        fontWeight: "600",
-                        marginBottom: 4,
-                      }}
-                    >
-                      {ledgerAccounts.length} Account
-                      {ledgerAccounts.length > 1 ? "s" : ""} Found
-                      {ledgerWalletProgress > 0 &&
-                        ` (Scanning ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length})`}
-                    </Text>
-                    <Text style={{ color: "#666", fontSize: 11 }}>
-                      Scanned:{" "}
-                      {ledgerDerivationPatterns
-                        .map((p) => {
-                          if (p === "standard") return "Standard";
-                          if (p === "ledgerLive") return "Ledger Live";
-                          if (p === "alternate") return "Alternate";
-                          return p;
-                        })
-                        .join(", ")}
-                    </Text>
-                  </View>
-                </View>
-
-                {/* Add All Accounts Button */}
-                {ledgerAccounts.length > 1 && (
-                  <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
-                    <TouchableOpacity
-                      onPress={handleAddAllLedgerAccounts}
-                      style={{
-                        backgroundColor: "#4A90E2",
-                        borderRadius: 8,
-                        padding: 10,
-                        marginBottom: 8,
-                        borderWidth: 1,
-                        borderColor: "rgba(74, 144, 226, 0.3)",
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: "#FFFFFF",
-                          fontSize: 14,
-                          fontWeight: "600",
-                          textAlign: "center",
-                        }}
-                      >
-                        Add All {ledgerAccounts.length} Accounts
-                      </Text>
-                      <Text
-                        style={{
-                          color: "rgba(255, 255, 255, 0.8)",
-                          fontSize: 11,
-                          textAlign: "center",
-                          marginTop: 2,
-                        }}
-                      >
-                        Import all discovered accounts at once
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                <FlatList
-                  data={ledgerAccounts}
-                  keyExtractor={(item) => item.address}
-                  contentContainerStyle={{
-                    paddingHorizontal: 16,
-                    paddingTop: 8,
-                  }}
-                  renderItem={({ item }) => (
-                    <TouchableOpacity
-                      onPress={() => handleSelectLedgerAccount(item)}
-                      style={{
-                        backgroundColor: "#1a1a1a",
-                        borderRadius: 8,
-                        padding: 10,
-                        marginBottom: 8,
-                        borderWidth: 1,
-                        borderColor: "rgba(255, 255, 255, 0.08)",
-                      }}
-                    >
-                      <View
-                        style={{ flexDirection: "row", alignItems: "center" }}
-                      >
-                        {/* Account Badge */}
-                        <View
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 16,
-                            backgroundColor: "#4A90E2",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            marginRight: 10,
-                          }}
-                        >
-                          <Text
-                            style={{
-                              color: "#FFF",
-                              fontSize: 14,
-                              fontWeight: "600",
-                            }}
-                          >
-                            {item.displayIndex + 1}
-                          </Text>
-                        </View>
-
-                        {/* Account Info */}
-                        <View style={{ flex: 1 }}>
-                          <Text
-                            style={{
-                              color: "#FFF",
-                              fontSize: 13,
-                              fontWeight: "500",
-                              marginBottom: 2,
-                            }}
-                          >
-                            {item.address.slice(0, 6)}...
-                            {item.address.slice(-4)}
-                          </Text>
-                          {(item.solanaBalance > 0 || item.x1Balance > 0) && (
-                            <View style={{ flexDirection: "row", gap: 8 }}>
-                              {item.solanaBalance > 0 && (
-                                <Text
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#4A90E2",
-                                    fontWeight: "500",
-                                  }}
-                                >
-                                  {item.solanaBalance.toFixed(3)} SOL
-                                </Text>
-                              )}
-                              {item.x1Balance > 0 && (
-                                <Text
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#4A90E2",
-                                    fontWeight: "500",
-                                  }}
-                                >
-                                  {item.x1Balance.toFixed(3)} XNT
-                                </Text>
-                              )}
-                            </View>
-                          )}
-                        </View>
-
-                        {/* Arrow */}
-                        <Text
-                          style={{
-                            color: "rgba(255, 255, 255, 0.3)",
-                            fontSize: 18,
-                          }}
-                        >
-                          ›
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  )}
-                />
-              </>
-            ) : ledgerScanning && discoveredDevices.length === 0 ? (
-              // Scanning UI
-              <View style={styles.ledgerStatus}>
-                <Text style={styles.ledgerStatusText}>
-                  Scanning for devices...
-                </Text>
-                <Text style={styles.ledgerStatusSubtext}>
-                  Please ensure your Ledger is unlocked and Bluetooth is on.
-                </Text>
-              </View>
-            ) : (
-              // Device Discovery UI
-              <FlatList
-                data={discoveredDevices}
-                keyExtractor={(item) => item.id}
-                ListHeaderComponent={
-                  <>
-                    {/* Derivation Path Selector - Multi-Select */}
-                    <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
-                      <Text
-                        style={{
-                          color: "#999",
-                          fontSize: 11,
-                          marginBottom: 8,
-                        }}
-                      >
-                        Derivation Paths (tap to toggle)
-                      </Text>
-                      <View style={{ flexDirection: "row", gap: 8 }}>
-                        {[
-                          {
-                            key: "standard",
-                            label: "Standard",
-                            desc: "44'/501'/X'/0'",
-                          },
-                          {
-                            key: "ledgerLive",
-                            label: "Ledger Live",
-                            desc: "44'/501'/X'",
-                          },
-                          {
-                            key: "alternate",
-                            label: "Alternate",
-                            desc: "44'/501'/0'/X'",
-                          },
-                        ].map((pattern) => {
-                          const isSelected = ledgerDerivationPatterns.includes(
-                            pattern.key
-                          );
-                          return (
-                            <TouchableOpacity
-                              key={pattern.key}
-                              onPress={() => {
-                                if (isSelected) {
-                                  // Unselect - but don't allow deselecting if it's the only one
-                                  if (ledgerDerivationPatterns.length > 1) {
-                                    setLedgerDerivationPatterns(
-                                      ledgerDerivationPatterns.filter(
-                                        (p) => p !== pattern.key
-                                      )
-                                    );
-                                  }
-                                } else {
-                                  // Select
-                                  setLedgerDerivationPatterns([
-                                    ...ledgerDerivationPatterns,
-                                    pattern.key,
-                                  ]);
-                                }
-                              }}
-                              style={{
-                                flex: 1,
-                                backgroundColor: isSelected
-                                  ? "#4A90E2"
-                                  : "#1a1a1a",
-                                paddingVertical: 8,
-                                paddingHorizontal: 8,
-                                borderRadius: 6,
-                                borderWidth: 1,
-                                borderColor: isSelected
-                                  ? "#4A90E2"
-                                  : "rgba(255, 255, 255, 0.1)",
-                              }}
-                            >
-                              <Text
-                                style={{
-                                  color: isSelected ? "#FFF" : "#999",
-                                  fontSize: 11,
-                                  fontWeight: "600",
-                                  textAlign: "center",
-                                  marginBottom: 2,
-                                }}
-                              >
-                                {pattern.label} {isSelected ? "✓" : ""}
-                              </Text>
-                              <Text
-                                style={{
-                                  color: isSelected
-                                    ? "rgba(255,255,255,0.7)"
-                                    : "#666",
-                                  fontSize: 9,
-                                  textAlign: "center",
-                                }}
-                              >
-                                {pattern.desc}
-                              </Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    </View>
-
-                    {/* Bluetooth Settings Button */}
-                    <TouchableOpacity
-                      style={{
-                        backgroundColor: "#1a1a1a",
-                        paddingVertical: 12,
-                        paddingHorizontal: 16,
-                        marginHorizontal: 20,
-                        marginTop: 16,
-                        marginBottom: 16,
-                        borderRadius: 8,
-                        borderLeftWidth: 3,
-                        borderLeftColor: "#4A90E2",
-                      }}
-                      onPress={() => {
-                        Linking.sendIntent(
-                          "android.settings.BLUETOOTH_SETTINGS"
-                        );
-                      }}
-                    >
-                      <Text
-                        style={{
-                          fontSize: 14,
-                          color: "#CCCCCC",
-                          textAlign: "center",
-                        }}
-                      >
-                        Having connection issues? Check Bluetooth Settings
-                      </Text>
-                    </TouchableOpacity>
-                  </>
-                }
-                ListFooterComponent={
-                  ledgerConnecting ? (
-                    // Wallet Discovery Progress Indicator - Simple centered design
-                    <View
-                      style={{
-                        alignItems: "center",
-                        paddingVertical: 24,
-                        paddingHorizontal: 40,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: "rgba(255, 255, 255, 0.6)",
-                          fontSize: 13,
-                          marginBottom: 12,
-                          textAlign: "center",
-                        }}
-                      >
-                        {ledgerWalletProgress > 0
-                          ? `Scanning accounts... ${ledgerWalletProgress}/${30 * ledgerDerivationPatterns.length}`
-                          : "Connecting to Ledger..."}
-                      </Text>
-                      {ledgerWalletProgress > 0 && (
-                        <>
-                          <View
-                            style={{
-                              width: "100%",
-                              height: 3,
-                              backgroundColor: "rgba(74, 144, 226, 0.15)",
-                              borderRadius: 1.5,
-                              overflow: "hidden",
-                              marginBottom: 12,
-                            }}
-                          >
-                            <View
-                              style={{
-                                width: `${(ledgerWalletProgress / 30) * 100}%`,
-                                height: "100%",
-                                backgroundColor: "#4A90E2",
-                              }}
-                            />
-                          </View>
-                          <Text
-                            style={{
-                              color: "rgba(255, 255, 255, 0.4)",
-                              fontSize: 11,
-                              textAlign: "center",
-                            }}
-                          >
-                            {ledgerAccounts
-                              .slice(0, ledgerWalletProgress)
-                              .map((acc, i) => acc.address.slice(0, 4))
-                              .join(" • ")}
-                          </Text>
-                        </>
-                      )}
-                    </View>
-                  ) : null
-                }
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={styles.ledgerAccount}
-                    onPress={async () => {
-                      // Stop scanning before connecting
-                      if (ledgerScanSubscriptionRef.current) {
-                        try {
-                          ledgerScanSubscriptionRef.current.unsubscribe();
-                          ledgerScanSubscriptionRef.current = null;
-                        } catch (e) {}
-                      }
-                      setLedgerScanning(false);
-
-                      // Store device name
-                      const deviceName =
-                        item.deviceName ||
-                        item.name ||
-                        item.localName ||
-                        "Ledger Device";
-                      setLedgerDeviceName(deviceName);
-
-                      // Connect
-                      connectToLedger(item);
-                    }}
-                  >
-                    <View style={styles.ledgerAccountLeft}>
-                      <View style={styles.ledgerAccountInfo}>
-                        <Text style={styles.ledgerAccountIndex}>
-                          {item.deviceName ||
-                            item.name ||
-                            item.localName ||
-                            "Unknown Device"}
-                        </Text>
-                        <Text style={styles.ledgerAccountAddress}>
-                          ID: {item.id}
-                        </Text>
-                      </View>
-                    </View>
-                  </TouchableOpacity>
-                )}
-                ListEmptyComponent={
-                  !ledgerScanning && (
-                    <Text style={styles.debugNoLogs}>
-                      No devices found. Pull to refresh or try again.
-                    </Text>
-                  )
-                }
               />
-            )}
+            </View>
           </View>
-
-          {/* Custom toast notification for Ledger errors */}
-          {ledgerError ? (
-            <Animated.View
-              style={{
-                position: "absolute",
-                bottom: 20,
-                left: 20,
-                right: 20,
-                backgroundColor: "#1a1a1a",
-                borderRadius: 8,
-                padding: 16,
-                borderLeftWidth: 4,
-                borderLeftColor: "#4A90E2",
-                minWidth: 300,
-                transform: [{ translateY: ledgerErrorSlideAnim }],
-              }}
-            >
-              <Text
-                style={{
-                  color: "#FFFFFF",
-                  fontWeight: "600",
-                  fontSize: 14,
-                }}
-              >
-                Duplicate Wallet
-              </Text>
-              <Text
-                style={{
-                  color: "#999999",
-                  fontSize: 12,
-                  marginTop: 4,
-                }}
-              >
-                {ledgerError}
-              </Text>
-            </Animated.View>
-          ) : null}
-        </View>
-      </SimpleActionSheet>
+        </SimpleActionSheet>
+      </GestureHandlerRootView>
 
       {/* QR Scanner Modal */}
       {showQRScanner && (
@@ -7859,7 +6946,11 @@ function AppContent() {
                             settingsNavigationStack.length - 1
                           ] === "exportSeed"
                         ? "Export Seed Phrase"
-                        : "Change Seed Phrase"}
+                        : settingsNavigationStack[
+                              settingsNavigationStack.length - 1
+                            ] === "connectLedger"
+                          ? "Connect Ledger"
+                          : "Change Seed Phrase"}
               </Text>
               <TouchableOpacity
                 onPress={
@@ -7961,6 +7052,18 @@ function AppContent() {
                   >
                     <Text style={styles.settingsMenuItemText}>
                       Manage Security
+                    </Text>
+                    <Text style={styles.settingsMenuItemArrow}>›</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.settingsMenuItem}
+                    onPress={() => {
+                      navigateToSettingsScreen("connectLedger");
+                    }}
+                  >
+                    <Text style={styles.settingsMenuItemText}>
+                      Connect Ledger
                     </Text>
                     <Text style={styles.settingsMenuItemArrow}>›</Text>
                   </TouchableOpacity>
@@ -8224,6 +7327,34 @@ function AppContent() {
                   password={password}
                   onBack={() => {
                     setSettingsNavigationStack(["manageSecurity"]);
+                  }}
+                />
+              ) : settingsNavigationStack[
+                  settingsNavigationStack.length - 1
+                ] === "connectLedger" ? (
+                // Connect Ledger Page
+                <ConnectLedgerPage
+                  onDeviceConnected={async (data) => {
+                    const { device, account, transport } = data;
+
+                    // Store the device info
+                    setLedgerDeviceId(device.id);
+                    setLedgerDeviceName(device.name);
+                    setLedgerDeviceInfo({ id: device.id, name: device.name });
+
+                    // Store the transport for signing
+                    ledgerTransportRef.current = transport;
+
+                    // Close the settings modal
+                    setShowSettingsModal(false);
+                    setSettingsNavigationStack([]);
+
+                    Toast.show({
+                      type: "success",
+                      text1: "Ledger Connected",
+                      text2: `Connected to ${device.name}`,
+                      position: "bottom",
+                    });
                   }}
                 />
               ) : settingsNavigationStack[
@@ -8671,9 +7802,26 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
   },
+  activityCardTitleContainer: {
+    flexDirection: "column",
+  },
+  activityCardSubtitle: {
+    color: "#999999",
+    fontSize: 13,
+    marginTop: 2,
+  },
   activityCardTime: {
     color: "#999999",
     fontSize: 13,
+  },
+  activityCardValueContainer: {
+    flexDirection: "column",
+    alignItems: "flex-end",
+  },
+  activityCardValueUSD: {
+    color: "#999999",
+    fontSize: 12,
+    marginTop: 2,
   },
   activityCardRow: {
     flexDirection: "row",
