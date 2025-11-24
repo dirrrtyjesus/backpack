@@ -141,11 +141,68 @@ function upsertToken(token) {
 }
 
 /**
+ * Create tokens table if it doesn't exist
+ */
+function createTokensTable() {
+  return new Promise((resolve, reject) => {
+    const sql = `
+      CREATE TABLE IF NOT EXISTS tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        icon TEXT,
+        decimals INTEGER NOT NULL,
+        dev TEXT,
+        circ_supply REAL,
+        total_supply REAL,
+        token_program TEXT,
+        holder_count INTEGER,
+        fdv REAL,
+        mcap REAL,
+        usd_price REAL,
+        price_block_id INTEGER,
+        liquidity REAL,
+        twitter TEXT,
+        discord TEXT,
+        website TEXT,
+        telegram TEXT,
+        tags TEXT,
+        is_verified INTEGER DEFAULT 0,
+        organic_score REAL,
+        created_at TEXT,
+        updated_at TEXT,
+        last_synced DATETIME
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_tokens_symbol ON tokens(symbol);
+      CREATE INDEX IF NOT EXISTS idx_tokens_verified ON tokens(is_verified);
+    `;
+
+    db.exec(sql, (err) => {
+      if (err) {
+        reject(err);
+      } else {
+        console.log("✅ Tokens table ready");
+        resolve();
+      }
+    });
+  });
+}
+
+/**
  * Sync tokens for all specified tags
  */
 async function syncTokens() {
   let totalProcessed = 0;
   let totalErrors = 0;
+
+  // Create table first
+  try {
+    await createTokensTable();
+  } catch (error) {
+    console.error("❌ Error creating tokens table:", error.message);
+    throw error;
+  }
 
   for (let i = 0; i < tags.length; i++) {
     const tag = tags[i];
