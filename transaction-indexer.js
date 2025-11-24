@@ -24,7 +24,8 @@ const CONFIG = {
   X1_MAINNET_RPC: "https://rpc.mainnet.x1.xyz",
 
   // Solana RPC endpoints (using QuickNode for mainnet)
-  SOLANA_MAINNET_RPC: "https://capable-autumn-thunder.solana-mainnet.quiknode.pro/3d4ed46b454fa0ca3df983502fdf15fe87145d9e/",
+  SOLANA_MAINNET_RPC:
+    "https://capable-autumn-thunder.solana-mainnet.quiknode.pro/3d4ed46b454fa0ca3df983502fdf15fe87145d9e/",
   SOLANA_DEVNET_RPC: "https://api.devnet.solana.com",
   SOLANA_TESTNET_RPC: "https://api.testnet.solana.com",
 
@@ -314,9 +315,13 @@ function parseTransaction(txData, signature, walletAddress, blockchain = "x1") {
       tx.message?.accountKeys || []
     );
 
+    // Store the full mint address for token lookups
+    let tokenMint = null;
+
     if (tokenChange) {
       type = tokenChange.type;
       amount = tokenChange.amount;
+      tokenMint = tokenChange.mint; // Store full mint address
       const displayMint = abbreviateMint(tokenChange.mint);
       if (displayMint) {
         tokenName = displayMint;
@@ -351,6 +356,7 @@ function parseTransaction(txData, signature, walletAddress, blockchain = "x1") {
       amount,
       tokenName,
       tokenSymbol,
+      tokenMint, // Full mint address for token lookups
       fee,
       feePayer: tx.message?.accountKeys?.[0]?.pubkey || null,
       description: description || `${type} transaction`,
@@ -577,7 +583,12 @@ async function indexWallet(wallet) {
     for (const sigInfo of signatures) {
       try {
         const txData = await getTransaction(rpcUrl, sigInfo.signature);
-        const parsed = parseTransaction(txData, sigInfo.signature, address, blockchain);
+        const parsed = parseTransaction(
+          txData,
+          sigInfo.signature,
+          address,
+          blockchain
+        );
         transactions.push(parsed);
       } catch (error) {
         console.error(

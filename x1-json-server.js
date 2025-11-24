@@ -258,8 +258,8 @@ function insertTransaction(walletAddress, transaction, providerId) {
 
     const sql = `INSERT OR REPLACE INTO transactions
       (wallet_prefix, wallet_address, hash, type, timestamp, amount, token_name,
-       token_symbol, fee, fee_payer, description, error, source, nfts, provider_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+       token_symbol, token_mint, fee, fee_payer, description, error, source, nfts, provider_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
     const params = [
       prefix,
@@ -270,6 +270,7 @@ function insertTransaction(walletAddress, transaction, providerId) {
       transaction.amount,
       transaction.tokenName,
       transaction.tokenSymbol,
+      transaction.tokenMint,
       transaction.fee,
       transaction.feePayer,
       transaction.description,
@@ -313,6 +314,7 @@ function getTransactions(walletAddress, providerId, limit = 50, offset = 0) {
         amount: row.amount,
         tokenName: row.token_name,
         tokenSymbol: row.token_symbol,
+        tokenMint: row.token_mint,
         fee: row.fee,
         feePayer: row.fee_payer,
         description: row.description,
@@ -1298,12 +1300,17 @@ const server = http.createServer((req, res) => {
             ? `SELECT * FROM tokens WHERE id = ? AND is_verified = 1`
             : `SELECT * FROM tokens WHERE id = ?`;
           params = [mint];
+          console.log(`📋 SQL Query: Searching by mint address: ${mint}`);
         } else {
           // Query by symbol (can return multiple results)
+          const symbolUpper = symbol.toUpperCase();
           sql = verified
             ? `SELECT * FROM tokens WHERE symbol = ? AND is_verified = 1 ORDER BY mcap DESC LIMIT ?`
             : `SELECT * FROM tokens WHERE symbol = ? ORDER BY mcap DESC LIMIT ?`;
-          params = [symbol.toUpperCase(), limit];
+          params = [symbolUpper, limit];
+          console.log(
+            `📋 SQL Query: Searching by symbol: "${symbol}" → "${symbolUpper}" (verified: ${verified}, limit: ${limit})`
+          );
         }
 
         db.all(sql, params, (err, rows) => {
@@ -1346,7 +1353,19 @@ const server = http.createServer((req, res) => {
             lastSynced: row.last_synced,
           }));
 
-          console.log(`✅ Found ${tokens.length} token(s)\n`);
+          if (tokens.length > 0) {
+            console.log(`✅ Found ${tokens.length} token(s):`);
+            tokens.forEach((token, idx) => {
+              console.log(
+                `   ${idx + 1}. ${token.name} (${token.symbol}) - $${token.price || "N/A"}`
+              );
+              console.log(`      Mint: ${token.mint.substring(0, 12)}...`);
+              console.log(`      Verified: ${token.isVerified ? "✓" : "✗"}`);
+            });
+            console.log("");
+          } else {
+            console.log(`⚠️  No tokens found matching the query\n`);
+          }
 
           res.writeHead(200);
           res.end(
