@@ -346,6 +346,69 @@ function getTransactionCount(walletAddress, providerId) {
   });
 }
 
+// Get transactions older than a specific hash (for "Load More" pagination)
+function getTransactionsBeforeHash(
+  walletAddress,
+  providerId,
+  beforeHash,
+  limit = 50
+) {
+  return new Promise((resolve, reject) => {
+    const prefix = getWalletPrefix(walletAddress);
+
+    // First, get the timestamp of the "before" transaction
+    const getTimestampSql = `SELECT timestamp FROM transactions
+      WHERE wallet_prefix = ? AND provider_id = ? AND hash = ?`;
+
+    db.get(getTimestampSql, [prefix, providerId, beforeHash], (err, row) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      if (!row) {
+        // Hash not found - return empty array
+        resolve([]);
+        return;
+      }
+
+      const beforeTimestamp = row.timestamp;
+
+      // Get transactions older than this timestamp (excluding the beforeHash itself)
+      const sql = `SELECT * FROM transactions
+        WHERE wallet_prefix = ? AND provider_id = ? AND timestamp < ?
+        ORDER BY timestamp DESC
+        LIMIT ?`;
+
+      db.all(sql, [prefix, providerId, beforeTimestamp, limit], (err, rows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        // Transform database rows to transaction objects
+        const transactions = rows.map((row) => ({
+          hash: row.hash,
+          type: row.type,
+          timestamp: row.timestamp,
+          amount: row.amount,
+          tokenName: row.token_name,
+          tokenSymbol: row.token_symbol,
+          tokenMint: row.token_mint,
+          fee: row.fee,
+          feePayer: row.fee_payer,
+          description: row.description,
+          error: row.error,
+          source: row.source,
+          nfts: row.nfts ? JSON.parse(row.nfts) : [],
+        }));
+
+        resolve(transactions);
+      });
+    });
+  });
+}
+
 // ============================================================================
 // Wallet Registry Functions
 // ============================================================================
@@ -990,6 +1053,7 @@ const server = http.createServer((req, res) => {
         const providerId = queryParams.get("providerId") || "X1-mainnet";
         const limit = Math.min(parseInt(queryParams.get("limit") || "50"), 50);
         const offset = parseInt(queryParams.get("offset") || "0");
+        const beforeHash = queryParams.get("before"); // Hash-based pagination
         const tokenMint = queryParams.get("tokenMint");
 
         console.log(`\n📥 Transaction Activity Request (GET):`);
@@ -997,21 +1061,41 @@ const server = http.createServer((req, res) => {
           `   Address: ${address} (prefix: ${getWalletPrefix(address)})`
         );
         console.log(`   Provider: ${providerId}`);
-        console.log(`   Limit: ${limit}, Offset: ${offset}`);
+        console.log(`   Limit: ${limit}`);
+        if (beforeHash) {
+          console.log(
+            `   Before: ${beforeHash.substring(0, 16)}... (hash-based pagination)`
+          );
+        } else {
+          console.log(`   Offset: ${offset} (offset-based pagination)`);
+        }
         if (tokenMint) console.log(`   Token Mint: ${tokenMint}`);
 
         // Auto-register wallet for indexing
         await autoRegisterWallet(address, providerId);
 
-        // Fetch from database
-        const transactions = await getTransactions(
-          address,
-          providerId,
-          limit,
-          offset
-        );
+        // Fetch from database using appropriate pagination method
+        let transactions;
+        if (beforeHash) {
+          // Hash-based pagination (for "Load More" functionality)
+          transactions = await getTransactionsBeforeHash(
+            address,
+            providerId,
+            beforeHash,
+            limit
+          );
+        } else {
+          // Offset-based pagination (for initial load or legacy support)
+          transactions = await getTransactions(
+            address,
+            providerId,
+            limit,
+            offset
+          );
+        }
+
         const totalCount = await getTransactionCount(address, providerId);
-        const hasMore = offset + transactions.length < totalCount;
+        const hasMore = transactions.length >= limit;
 
         const response = {
           transactions,
@@ -1021,7 +1105,7 @@ const server = http.createServer((req, res) => {
             address,
             providerId,
             limit,
-            offset,
+            ...(beforeHash ? { before: beforeHash } : { offset }),
           },
           meta: {
             timestamp: new Date().toISOString(),
@@ -1566,7 +1650,11 @@ const server = http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const requestData = JSON.parse(body);
-        const { address, network = "X1-testnet" } = requestData;
+        const {
+          address,
+          network = "X1-testnet",
+          beforeSignature,
+        } = requestData;
 
         if (!address) {
           res.writeHead(400);
@@ -1580,11 +1668,15 @@ const server = http.createServer((req, res) => {
         }
 
         console.log(
-          `\n🎯 On-demand indexing triggered for: ${address.substring(0, 8)}... (${network})`
+          `\n🎯 On-demand indexing triggered for: ${address.substring(0, 8)}... (${network})${beforeSignature ? " [Load More]" : ""}`
         );
 
-        // Call the on-demand indexer
-        const result = await indexWalletOnDemand(address, network);
+        // Call the on-demand indexer (with optional beforeSignature for pagination)
+        const result = await indexWalletOnDemand(
+          address,
+          network,
+          beforeSignature
+        );
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(

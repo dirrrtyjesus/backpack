@@ -335,6 +335,9 @@ function AppContent() {
   const [transactions, setTransactions] = useState([]);
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexingMessage, setIndexingMessage] = useState("");
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMoreTransactions, setHasMoreTransactions] = useState(true);
+  const [oldestSignature, setOldestSignature] = useState(null);
   const [balanceCache, setBalanceCache] = useState({});
   const [gainLossCache, setGainLossCache] = useState({});
   const [currentNetwork, setCurrentNetwork] = useState(NETWORKS[0]);
@@ -956,7 +959,6 @@ function AppContent() {
       // For Solana networks, only fetch the SOL price for header display
       // (TokenBalances component handles full balance via GraphQL)
       if (activeNetwork.providerId.startsWith("SOLANA")) {
-        console.log("Fetching SOL price for header from REST API");
         try {
           const solPriceResponse = await fetch(
             `${API_SERVER}/wallet/So11111111111111111111111111111111111111112?providerId=${activeNetwork.providerId}`
@@ -965,7 +967,6 @@ function AppContent() {
           const solPrice = solPriceData?.tokens?.[0]?.price;
           if (solPrice && solPrice > 0) {
             setTokenPrice(solPrice);
-            console.log("Updated SOL header price:", solPrice);
           }
         } catch (error) {
           console.error("Failed to fetch SOL price for header:", error);
@@ -1205,49 +1206,93 @@ function AppContent() {
       setIsIndexing(true);
       setIndexingMessage("Checking for new transactions...");
 
-      // Step 1: Trigger on-demand indexing
-      console.log("🎯 Triggering on-demand indexing...");
-      const indexUrl = `${API_SERVER}/wallets/index-now`;
+      // Step 1: Check database first (database-first approach)
+      console.log("📂 Checking database for existing transactions...");
+      const checkUrl = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
+      const checkResponse = await fetch(checkUrl);
+      const checkData = await checkResponse.json();
 
-      const indexResponse = await fetch(indexUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          address: selectedWallet.publicKey,
-          network: activeNetwork.providerId,
-        }),
-      });
+      let needsIndexing =
+        !checkData ||
+        !checkData.transactions ||
+        checkData.transactions.length === 0;
+      let dataToProcess = null;
 
-      const indexResult = await indexResponse.json();
-      console.log("✅ Indexing result:", indexResult);
-
-      if (indexResult.indexed > 0) {
-        setIndexingMessage(`Found ${indexResult.indexed} new transactions`);
+      // If we already have data from database, use it immediately
+      if (!needsIndexing) {
+        console.log(
+          `✓ Found ${checkData.transactions.length} existing transactions in database (no blockchain fetch needed)`
+        );
+        setIndexingMessage("Loading from database...");
+        dataToProcess = checkData;
       } else {
-        setIndexingMessage("No new transactions found");
+        // Step 2: Database empty - trigger on-demand indexing
+        console.log("⚠️  Database empty - triggering blockchain indexing...");
+        setIndexingMessage("Fetching from blockchain...");
+
+        const indexUrl = `${API_SERVER}/wallets/index-now`;
+        const indexResponse = await fetch(indexUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            address: selectedWallet.publicKey,
+            network: activeNetwork.providerId,
+          }),
+        });
+
+        if (!indexResponse.ok) {
+          const errorText = await indexResponse.text();
+          console.error(
+            `❌ Indexing failed: ${indexResponse.status} ${indexResponse.statusText}`
+          );
+          console.error(`Response: ${errorText.substring(0, 200)}`);
+          throw new Error(`Indexing API error: ${indexResponse.status}`);
+        }
+
+        const indexResult = await indexResponse.json();
+        console.log("✅ Indexing result:", indexResult);
+
+        if (indexResult.indexed > 0) {
+          setIndexingMessage(`Found ${indexResult.indexed} new transactions`);
+        } else {
+          setIndexingMessage("No transactions found");
+        }
       }
 
-      // Step 2: Poll for transactions (up to 30 seconds)
+      // Step 3: Fetch/Poll for transactions (only if we need to wait for indexing)
       const POLL_INTERVAL = 5000; // 5 seconds
       const MAX_POLLS = 6; // 30 seconds total
       let pollCount = 0;
       let transactionsFound = false;
 
       const pollTransactions = async () => {
-        pollCount++;
-        console.log(`📊 Polling attempt ${pollCount}/${MAX_POLLS}...`);
+        // If we already have data from database, use it immediately
+        let data;
+        if (dataToProcess) {
+          console.log(
+            `📊 Using ${dataToProcess.transactions.length} transactions from initial database check`
+          );
+          data = dataToProcess;
+          dataToProcess = null; // Clear it so we don't use it again
+        } else {
+          // Poll for newly indexed transactions
+          pollCount++;
+          console.log(`📊 Polling attempt ${pollCount}/${MAX_POLLS}...`);
 
-        setIndexingMessage(
-          `Loading transactions (${pollCount}/${MAX_POLLS})...`
-        );
+          setIndexingMessage(
+            `Loading transactions (${pollCount}/${MAX_POLLS})...`
+          );
 
-        const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
-        const response = await fetch(url);
-        const data = await response.json();
+          const url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}`;
+          const response = await fetch(url);
+          data = await response.json();
 
-        console.log(`Received ${data?.transactions?.length || 0} transactions`);
+          console.log(
+            `Received ${data?.transactions?.length || 0} transactions`
+          );
+        }
 
         if (data && data.transactions && data.transactions.length > 0) {
           // Transactions found!
@@ -1432,10 +1477,28 @@ function AppContent() {
             return dateB - dateA;
           });
 
-          console.log(
-            `✅ Setting ${nonMicroTransactions.length} transactions grouped into ${groupedTransactions.length} dates`
-          );
+          // Log date range of loaded transactions
+          if (groupedTransactions.length > 0) {
+            const newestDate = groupedTransactions[0].date;
+            const oldestDate =
+              groupedTransactions[groupedTransactions.length - 1].date;
+            console.log(
+              `✅ Loaded ${nonMicroTransactions.length} transactions | Date range: ${oldestDate} to ${newestDate}`
+            );
+          } else {
+            console.log(
+              `✅ Loaded ${nonMicroTransactions.length} transactions`
+            );
+          }
           setTransactions(groupedTransactions);
+
+          // Track oldest signature for pagination
+          if (data.transactions && data.transactions.length > 0) {
+            const lastTx = data.transactions[data.transactions.length - 1];
+            setOldestSignature(lastTx.hash);
+            setHasMoreTransactions(data.transactions.length >= 50);
+          }
+
           setIndexingMessage(
             `Loaded ${nonMicroTransactions.length} transactions`
           );
@@ -1469,6 +1532,195 @@ function AppContent() {
       console.error("Error checking transactions:", error);
       setIndexingMessage("Error loading transactions");
       setIsIndexing(false);
+    }
+  };
+
+  // Load more transactions when scrolling to bottom
+  const loadMoreTransactions = async () => {
+    if (!selectedWallet || isLoadingMore || !hasMoreTransactions) {
+      return;
+    }
+
+    const activeNetwork = currentNetwork;
+    if (!activeNetwork) {
+      console.log("No active network available");
+      return;
+    }
+
+    if (!oldestSignature) {
+      console.log("No oldest signature available for pagination");
+      return;
+    }
+
+    try {
+      setIsLoadingMore(true);
+      console.log(
+        `📜 Loading more transactions before: ${oldestSignature.substring(0, 8)}...`
+      );
+
+      // Step 1: Check database first (database-first approach)
+      console.log("📂 Checking database for more transactions...");
+      let url = `${API_SERVER}/transactions/${selectedWallet.publicKey}?providerId=${activeNetwork.providerId}&before=${oldestSignature}`;
+      let response = await fetch(url);
+      let data = await response.json();
+
+      // Step 2: If database is empty, trigger blockchain indexing
+      if (!data || !data.transactions || data.transactions.length === 0) {
+        console.log("⚠️  Database exhausted - fetching from blockchain...");
+
+        const indexResponse = await fetch(`${API_SERVER}/wallets/index-now`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address: selectedWallet.publicKey,
+            network: activeNetwork.providerId,
+            beforeSignature: oldestSignature, // Fetch transactions BEFORE this one
+          }),
+        });
+
+        if (!indexResponse.ok) {
+          const errorText = await indexResponse.text();
+          console.error(`❌ Indexing failed: ${indexResponse.status}`);
+          throw new Error(`Indexing failed: ${indexResponse.status}`);
+        }
+
+        const indexResult = await indexResponse.json();
+        console.log(`   ✅ Indexed ${indexResult.indexed} older transactions`);
+
+        // If no new transactions were indexed, we've reached the end
+        if (indexResult.indexed === 0) {
+          console.log(
+            "   ✅ No more transactions available (end of blockchain history)"
+          );
+          setHasMoreTransactions(false);
+          setIsLoadingMore(false);
+          return;
+        }
+
+        // Step 3: Fetch the newly indexed transactions from database
+        response = await fetch(url);
+        data = await response.json();
+      } else {
+        console.log(
+          `✓ Found ${data.transactions.length} more transactions in database (no blockchain fetch needed)`
+        );
+      }
+
+      if (data && data.transactions && data.transactions.length > 0) {
+        // Log date range of newly loaded transactions
+        const firstNewTx = data.transactions[0];
+        const lastNewTx = data.transactions[data.transactions.length - 1];
+        const firstDate = new Date(
+          firstNewTx.timestamp * 1000
+        ).toLocaleDateString();
+        const lastDate = new Date(
+          lastNewTx.timestamp * 1000
+        ).toLocaleDateString();
+        console.log(
+          `   📦 Loaded ${data.transactions.length} more transactions | Date range: ${lastDate} to ${firstDate}`
+        );
+
+        // Process new transactions (same logic as checkTransactions)
+        const formattedTransactions = await Promise.all(
+          data.transactions.map(async (tx) => {
+            let date;
+            if (typeof tx.timestamp === "string") {
+              date = new Date(tx.timestamp);
+            } else if (typeof tx.timestamp === "number") {
+              date = new Date(tx.timestamp * 1000);
+            } else {
+              date = new Date();
+            }
+            const isValidDate = !isNaN(date.getTime());
+
+            const amountNum =
+              typeof tx.amount === "string"
+                ? parseFloat(tx.amount)
+                : tx.amount || 0;
+
+            let displayType = "received";
+            if (tx.type === "SEND") {
+              displayType = "sent";
+            } else if (tx.type === "RECEIVE") {
+              displayType = "received";
+            } else if (tx.type === "SWAP") {
+              displayType = "swap";
+            } else if (tx.type === "UNKNOWN") {
+              displayType = "unknown";
+            }
+
+            const tokenSymbol =
+              tx.tokenSymbol || tx.symbol || tx.token || "XNT";
+            const tokenMint = tx.tokenMint || tx.mint;
+
+            return {
+              id: tx.hash,
+              type: displayType,
+              amount: amountNum,
+              token: tokenSymbol,
+              signature: tx.hash,
+              timestamp: isValidDate
+                ? date.toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  })
+                : "Unknown date",
+              timestampDate: date,
+              tokenIcon: null,
+              tokenName: null,
+              tokenPrice: null,
+              valueUSD: null,
+            };
+          })
+        );
+
+        // Merge with existing transactions and remove duplicates
+        const allTransactions = [...transactions];
+
+        formattedTransactions.forEach((newTx) => {
+          const existing = allTransactions.find((group) =>
+            group.transactions.some((t) => t.id === newTx.id)
+          );
+          if (!existing) {
+            // Find or create date group
+            let dateGroup = allTransactions.find(
+              (g) => g.date === newTx.timestamp
+            );
+            if (!dateGroup) {
+              dateGroup = { date: newTx.timestamp, transactions: [] };
+              allTransactions.push(dateGroup);
+            }
+            dateGroup.transactions.push(newTx);
+          }
+        });
+
+        // Sort groups by date
+        allTransactions.sort((a, b) => {
+          const dateA = a.transactions[0].timestampDate;
+          const dateB = b.transactions[0].timestampDate;
+          return dateB - dateA;
+        });
+
+        setTransactions(allTransactions);
+
+        // Update oldest signature for next pagination
+        const lastTx = data.transactions[data.transactions.length - 1];
+        setOldestSignature(lastTx.hash);
+
+        // Check if there are more transactions
+        if (data.transactions.length < 50) {
+          setHasMoreTransactions(false);
+          console.log("   ✅ No more transactions available");
+        }
+      } else {
+        console.log("   ✅ No more transactions found");
+        setHasMoreTransactions(false);
+      }
+    } catch (error) {
+      console.error("Error loading more transactions:", error);
+    } finally {
+      setIsLoadingMore(false);
     }
   };
 
@@ -6414,6 +6666,55 @@ function AppContent() {
                   </View>
                 ))
               )}
+
+              {/* Load More Button */}
+              {!isLoadingMore &&
+                hasMoreTransactions &&
+                transactions.length > 0 && (
+                  <TouchableOpacity
+                    style={{
+                      padding: 15,
+                      margin: 20,
+                      backgroundColor: "#4A90E2",
+                      borderRadius: 8,
+                      alignItems: "center",
+                    }}
+                    onPress={loadMoreTransactions}
+                  >
+                    <Text
+                      style={{
+                        color: "#FFFFFF",
+                        fontSize: 16,
+                        fontWeight: "600",
+                      }}
+                    >
+                      Load More Transactions
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+              {/* Loading More Indicator */}
+              {isLoadingMore &&
+                hasMoreTransactions &&
+                transactions.length > 0 && (
+                  <View style={{ padding: 20, alignItems: "center" }}>
+                    <ActivityIndicator size="small" color="#4A90E2" />
+                    <Text style={styles.emptyStateSubtext}>
+                      Loading more...
+                    </Text>
+                  </View>
+                )}
+
+              {/* End of List Indicator */}
+              {!hasMoreTransactions &&
+                transactions.length > 0 &&
+                !isLoadingMore && (
+                  <View style={{ padding: 20, alignItems: "center" }}>
+                    <Text style={styles.emptyStateSubtext}>
+                      No more transactions
+                    </Text>
+                  </View>
+                )}
             </ScrollView>
           </SimpleActionSheet>
 
