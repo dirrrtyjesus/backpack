@@ -162,8 +162,69 @@ function initializeDatabase() {
                 }
               );
 
-              console.log("✅ Database initialized");
-              resolve();
+              // Create tokens table for Solana token metadata
+              db.run(
+                `CREATE TABLE IF NOT EXISTS tokens (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  icon TEXT,
+                  decimals INTEGER NOT NULL,
+                  dev TEXT,
+                  circ_supply REAL,
+                  total_supply REAL,
+                  token_program TEXT,
+                  holder_count INTEGER,
+                  fdv REAL,
+                  mcap REAL,
+                  usd_price REAL,
+                  price_block_id INTEGER,
+                  liquidity REAL,
+                  twitter TEXT,
+                  discord TEXT,
+                  website TEXT,
+                  telegram TEXT,
+                  tags TEXT,
+                  is_verified INTEGER DEFAULT 0,
+                  organic_score REAL,
+                  created_at TEXT,
+                  updated_at TEXT,
+                  last_synced DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`,
+                (err) => {
+                  if (err) {
+                    console.error("❌ Error creating tokens table:", err);
+                    reject(err);
+                    return;
+                  }
+
+                  // Create indexes for tokens table
+                  db.run(
+                    `CREATE INDEX IF NOT EXISTS idx_token_symbol ON tokens(symbol)`,
+                    (err) => {
+                      if (err)
+                        console.error(
+                          "Warning: Error creating token_symbol index:",
+                          err
+                        );
+                    }
+                  );
+
+                  db.run(
+                    `CREATE INDEX IF NOT EXISTS idx_token_verified ON tokens(is_verified)`,
+                    (err) => {
+                      if (err)
+                        console.error(
+                          "Warning: Error creating token_verified index:",
+                          err
+                        );
+                    }
+                  );
+
+                  console.log("✅ Database initialized");
+                  resolve();
+                }
+              );
             }
           );
         }
