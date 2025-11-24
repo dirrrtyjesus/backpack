@@ -3925,6 +3925,9 @@ function AppContent() {
         const pathGenerator = DERIVATION_PATTERNS[patternKey];
         console.log(`\n[Ledger Scan] === Scanning ${patternKey} pattern ===`);
 
+        let consecutiveEmptyAccounts = 0;
+        const EARLY_STOP_THRESHOLD = 5;
+
         for (let i = 0; i < MAX_ACCOUNTS; i++) {
           totalScanned++;
           const derivationPath = pathGenerator(i);
@@ -3982,13 +3985,26 @@ function AppContent() {
             console.log(
               `  ✓ Account HAS balance - added to list as Account ${accountsWithBalance.length}`
             );
+            consecutiveEmptyAccounts = 0; // Reset counter when we find an account with balance
           } else {
             console.log(`  ✗ Account has no balance`);
+            consecutiveEmptyAccounts++;
+            console.log(
+              `  Consecutive empty accounts: ${consecutiveEmptyAccounts}/${EARLY_STOP_THRESHOLD}`
+            );
           }
 
           // Update state with all accounts that have balances
           setLedgerAccounts([...accountsWithBalance]);
           setLedgerWalletProgress(totalScanned);
+
+          // Early stop if we've seen 5 consecutive accounts with zero balance
+          if (consecutiveEmptyAccounts >= EARLY_STOP_THRESHOLD) {
+            console.log(
+              `\n[Ledger Scan] Stopping ${patternKey} pattern after ${EARLY_STOP_THRESHOLD} consecutive empty accounts`
+            );
+            break;
+          }
         }
       }
 
